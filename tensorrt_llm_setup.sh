@@ -3,8 +3,7 @@ conda activate tensorrtllm
 
 # IMPORTANT
 conda install -c conda-forge "python=3.10.13=hd12c33a_*"
-# might need to export LD_LIBRARY_PATH whenever activate the env
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+conda install -c conda-forge mpi4py
 
 # https://nvidia.github.io/TensorRT-LLM/installation/linux.html
 pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
@@ -14,3 +13,8 @@ pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/wh
 # sudo apt-get -y install libzmq3-dev
 
 pip install --upgrade pip setuptools && pip install tensorrt_llm
+
+pip install parameterized pytest
+
+# IMPORTANT!!!! BUT CONFLICT W/ GIT, SO USE SEPARATE SHELL FOR GIT
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH

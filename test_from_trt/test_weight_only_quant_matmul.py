@@ -81,16 +81,17 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             'x': mat1,
         }
 
-        [ run_session(session, inputs) for _ in range(10) ]
+        [ outputs := run_session(session, inputs) for _ in range(10) ]
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
         start.record()
-        [ run_session(session, inputs) for _ in range(10) ]
+        [ outputs := run_session(session, inputs) for _ in range(10) ]
         end.record()
         torch.cuda.synchronize()
-        print(f"Run session for: {start.elapsed_time(end) :.3f} milliseconds")
+        print(f"x shape {mat1.shape}, weights size {processed_torch_weights.nbytes}, wTypeId {wTypeId}, use_plugin {use_plugin}: {start.elapsed_time(end) :.3f} milliseconds")
+
 
         return outputs['output']
 
@@ -101,7 +102,6 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
 
         ref_torch_weights, processed_torch_weights, torch_weight_scales = _utils.woq_conversion(
             weight, wTypeId)
-        print(processed_torch_weights.nbytes)
         if wTypeId == 2 and use_plugin:
             ref_torch_weights = torch.ops.trtllm.unpack_int4_packed_tensor_to_int8(
                 ref_torch_weights.cpu())
