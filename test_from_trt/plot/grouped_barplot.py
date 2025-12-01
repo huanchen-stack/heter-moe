@@ -4,6 +4,7 @@ import numpy as np
 # mixtral-8x22B expert runtime data
 # hidden=6144, intermediate=22528
 # Columns: (batch_size, runtime_ms, weight_type, tiling_dequant, weights_size_GB)
+# Device: A100
 raw_data = [
     (128,0.611,"fp16",False,0.7734),(128,0.609,"int8",False,0.3867),(128,0.706,"int8",True,0.3867),(128,0.679,"int4",True,0.1934),
     (16,0.596,"fp16",False,0.7734),(16,0.568,"int8",False,0.3867),(16,0.499,"int8",True,0.3867),(16,0.386,"int4",True,0.1934),
@@ -14,9 +15,40 @@ raw_data = [
     (64,0.598,"fp16",False,0.7734),(64,0.574,"int8",False,0.3867),(64,0.593,"int8",True,0.3867),(64,0.514,"int4",True,0.1934),
     (8,0.570,"fp16",False,0.7734),(8,0.556,"int8",False,0.3867),(8,0.490,"int8",True,0.3867),(8,0.353,"int4",True,0.1934),
 ]
+# mixtral-8x22B expert runtime data
+# hidden=6144, intermediate=22528
+# Columns: (batch_size, runtime_ms, weight_type, tiling_dequant, weights_size_GB)
+# Device: H100
+raw_data = [
+    (128,0.384,"fp16",False,0.7734),(128,0.383,"int8",False,0.3867),(128,0.428,"int8",True,0.3867),(128,0.391,"int4",True,0.1934),
+    (16,0.388,"fp16",False,0.7734),(16,0.360,"int8",False,0.3867),(16,0.334,"int8",True,0.3867),(16,0.272,"int4",True,0.1934),
+    (1,0.355,"fp16",False,0.7734),(1,0.361,"int8",False,0.3867),(1,0.285,"int8",True,0.3867),(1,0.190,"int4",True,0.1934),
+    (256,0.436,"fp16",False,0.7734),(256,0.432,"int8",False,0.3867),(256,0.581,"int8",True,0.3867),(256,0.564,"int4",True,0.1934),
+    (32,0.378,"fp16",False,0.7734),(32,0.360,"int8",False,0.3867),(32,0.349,"int8",True,0.3867),(32,0.275,"int4",True,0.1934),
+    (512,0.717,"fp16",False,0.7734),(512,0.685,"int8",False,0.3867),(512,0.985,"int8",True,0.3867),(512,0.910,"int4",True,0.1934),
+    (64,0.385,"fp16",False,0.7734),(64,0.385,"int8",False,0.3867),(64,0.371,"int8",True,0.3867),(64,0.304,"int4",True,0.1934),
+    (8,0.357,"fp16",False,0.7734),(8,0.369,"int8",False,0.3867),(8,0.336,"int8",True,0.3867),(8,0.267,"int4",True,0.1934),
+]
 
-# mixtral-8x7B expert runtime data
-# hidden=4096, intermediate=14336
+# # mixtral-8x22B expert runtime data
+# # hidden=6144, intermediate=22528
+# # Columns: (batch_size, runtime_ms, weight_type, tiling_dequant, weights_size_GB)
+# # Device: H200
+# raw_data = [
+#     (128,0.277,"fp16",False,0.7734),(128,0.218,"int8",False,0.3867),(128,0.259,"int8",True,0.3867),(128,0.260,"int4",True,0.1934),
+#     (16,0.223,"fp16",False,0.7734),(16,0.234,"int8",False,0.3867),(16,0.240,"int8",True,0.3867),(16,0.224,"int4",True,0.1934),
+#     (1,0.206,"fp16",False,0.7734),(1,0.198,"int8",False,0.3867),(1,0.168,"int8",True,0.3867),(1,0.132,"int4",True,0.1934),
+#     (256,0.331,"fp16",False,0.7734),(256,0.322,"int8",False,0.3867),(256,0.415,"int8",True,0.3867),(256,0.376,"int4",True,0.1934),
+#     (32,0.275,"fp16",False,0.7734),(32,0.242,"int8",False,0.3867),(32,0.241,"int8",True,0.3867),(32,0.193,"int4",True,0.1934),
+#     (512,0.530,"fp16",False,0.7734),(512,0.546,"int8",False,0.3867),(512,0.736,"int8",True,0.3867),(512,0.850,"int4",True,0.1934),
+#     (64,0.249,"fp16",False,0.7734),(64,0.246,"int8",False,0.3867),(64,0.223,"int8",True,0.3867),(64,0.256,"int4",True,0.1934),
+#     (8,0.236,"fp16",False,0.7734),(8,0.244,"int8",False,0.3867),(8,0.235,"int8",True,0.3867),(8,0.214,"int4",True,0.1934),
+# ]
+
+
+
+# # mixtral-8x7B expert runtime data
+# # hidden=4096, intermediate=14336
 # raw_data = [
 #     (128,0.394,"fp16",False,0.3281),(128,0.362,"int8",False,0.1641),(128,0.435,"int8",True,0.1641),(128,0.428,"int4",True,0.0820),
 #     (16,0.338,"fp16",False,0.3281),(16,0.334,"int8",False,0.1641),(16,0.330,"int8",True,0.1641),(16,0.279,"int4",True,0.0820),
@@ -64,7 +96,7 @@ plt.bar(x + 1.5*width, a16w4_tile, width, label="a16w4 tile dequant (0.193 GB)",
 plt.xticks(x, batch_sizes)
 plt.xlabel("Batch Size")
 plt.ylabel("Runtime (ms)")
-plt.title("Mixtral-8x22B Expert Runtime vs Batch Size\nhidden=6144, intermediate=22528")
+plt.title("Mixtral-8x22B Per Expert Runtime vs Batch Size\nhidden=6144, intermediate=22528   Device: H100")
 # plt.title("Mixtral-8x7B Expert Runtime vs Batch Size\nhidden=4096, intermediate=14336")
 plt.grid(axis="y", linestyle="--", alpha=0.4)
 plt.legend()
@@ -80,4 +112,4 @@ for b in interesting_batches:
         plt.text(idx + 1.5*width, q4 + 0.02, f"x{speedup:.1f}", ha="center", color="black", fontsize=10)
 
 plt.tight_layout()
-plt.savefig("mixtral_8x22b_expert_runtime.png")
+plt.savefig("mixtral_8x22b_h100.png")
