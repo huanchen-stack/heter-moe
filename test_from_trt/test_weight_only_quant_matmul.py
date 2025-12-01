@@ -235,7 +235,7 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
 
         # Warmup
         if len(mat1_l) > 3:  # for multiple inputs, do fewer warmup runs
-            [ run_session(session, inputs) for _ in range(2) ]
+            [ run_session(session, inputs) for _ in range(5) ]
         else:
             [ run_session(session, inputs) for _ in range(10) ]
 
@@ -290,8 +290,8 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
     # intermediate=27648
     # hidden=8192  # llama3-70B
     # intermediate=28672
-    hidden=4096  # mixtral-8x7B
-    intermediate=14336
+    # hidden=4096  # mixtral-8x7B
+    # intermediate=14336
     hidden=6144  # mixtral-8x22B
     intermediate=22528
 
@@ -302,6 +302,38 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             (1, intermediate, hidden, 1, False, repeat),
             (1, intermediate, hidden, 1, True, repeat),
             (1, intermediate, hidden, 2, True, repeat),
+            (8, intermediate, hidden, 0, False, repeat),
+            (8, intermediate, hidden, 1, False, repeat),
+            (8, intermediate, hidden, 1, True, repeat),
+            (8, intermediate, hidden, 2, True, repeat),
+            (16, intermediate, hidden, 0, False, repeat),
+            (16, intermediate, hidden, 1, False, repeat),
+            (16, intermediate, hidden, 1, True, repeat),
+            (16, intermediate, hidden, 2, True, repeat),
+            (32, intermediate, hidden, 0, False, repeat),
+            (32, intermediate, hidden, 1, False, repeat),
+            (32, intermediate, hidden, 1, True, repeat),
+            (32, intermediate, hidden, 2, True, repeat),
+            (64, intermediate, hidden, 0, False, repeat),
+            (64, intermediate, hidden, 1, False, repeat),
+            (64, intermediate, hidden, 1, True, repeat),
+            (64, intermediate, hidden, 2, True, repeat),
+            (128, intermediate, hidden, 0, False, repeat),
+            (128, intermediate, hidden, 1, False, repeat),
+            (128, intermediate, hidden, 1, True, repeat),
+            (128, intermediate, hidden, 2, True, repeat),
+            (256, intermediate, hidden, 0, False, repeat),
+            (256, intermediate, hidden, 1, False, repeat),
+            (256, intermediate, hidden, 1, True, repeat),
+            (256, intermediate, hidden, 2, True, repeat),
+            (512, intermediate, hidden, 0, False, repeat),
+            (512, intermediate, hidden, 1, False, repeat),
+            (512, intermediate, hidden, 1, True, repeat),
+            (512, intermediate, hidden, 2, True, repeat),
+            # (1024, intermediate, hidden, 0, False, repeat),
+            # (1024, intermediate, hidden, 1, False, repeat),
+            # (1024, intermediate, hidden, 1, True, repeat),
+            # (1024, intermediate, hidden, 2, True, repeat),
         ],
         name_func=unittest_name_func)
     def test_expert_fp16_act(self, m, n, k, wTypeId, use_plugin, repeat):
