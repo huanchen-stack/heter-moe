@@ -162,6 +162,130 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
         print("###############\nmax diff is {} form {} vs {}\n###############\n\n".format(max_diff, out_value_of_max_diff, ref_value_of_max_diff))
         '''
 
+    def _run_expert_cudagraph(self, mat1_l, 
+                processed_torch_weights_13, torch_weight_scales_13,
+                processed_torch_weights_2, torch_weight_scales_2,
+                dtype, wTypeId, use_plugin):
+
+        builder = tensorrt_llm.Builder()
+        network = builder.create_network()
+
+        if use_plugin:
+            network.plugin_config.weight_only_quant_matmul_plugin = dtype
+
+        with tensorrt_llm.net_guard(network):
+
+            # Create separate TRT inputs with unique names
+            x_repeat = []
+            for i, mat1 in enumerate(mat1_l):
+                x_repeat.append(
+                    Tensor(
+                        name=f'x_{i}',
+                        shape=mat1.shape,
+                        dtype=tensorrt_llm._utils.str_dtype_to_trt(dtype)
+                    )
+                )
+
+            # Build weight constants
+            weights_13 = constant(torch_to_numpy(processed_torch_weights_13))
+            scale_13 = constant(torch_to_numpy(torch_weight_scales_13))
+            weights_2 = constant(torch_to_numpy(processed_torch_weights_2))
+            scale_2 = constant(torch_to_numpy(torch_weight_scales_2))
+
+            output = None
+            for i, x in enumerate(x_repeat):
+                if wTypeId == 0:
+                    gate = matmul(x, weights_13, transa=False, transb=False)
+                    up = matmul(x, weights_13, transa=False, transb=False)
+                    act = silu(up) * gate
+                    out_i = matmul(act, weights_2, transa=False, transb=False)
+
+                else:
+                    gate = weight_only_quant_matmul(
+                        x, weights_13, scale_13, wTypeId, dtype=dtype
+                    )
+                    up = weight_only_quant_matmul(
+                        x, weights_13, scale_13, wTypeId, dtype=dtype
+                    )
+                    act = silu(up) * gate
+                    out_i = weight_only_quant_matmul(
+                        act, weights_2, scale_2, wTypeId, dtype=dtype
+                    )
+
+                if output is None:
+                    output = out_i
+                else:
+                    output = output + out_i
+
+            output.mark_output('output', dtype)
+
+        # Build engine
+        session = create_session(
+            builder, network,
+            precision=dtype,
+            int8=True,
+        )
+
+        # Create static buffers for CUDA graph
+        static_inputs = {}
+        for i, mat1 in enumerate(mat1_l):
+            static_inputs[f'x_{i}'] = mat1.clone().detach().contiguous().cuda()
+
+        # Dry run to get output shape/structure (outside graph capture)
+        tmp_out = run_session(session, static_inputs)
+        static_outputs = {
+            name: out.clone().detach().contiguous().cuda()
+            for name, out in tmp_out.items()
+        }
+
+        # Create CUDA graph on the capture stream
+        g = torch.cuda.CUDAGraph()
+        capture_stream = torch.cuda.Stream()
+
+        # Warmup run on capture stream (prepares TRT engine)
+        with torch.cuda.stream(capture_stream):
+            _ = run_session(session, static_inputs)
+        
+        capture_stream.synchronize()
+
+        # Now capture the graph on the same stream
+        with torch.cuda.stream(capture_stream):
+            g.capture_begin()
+            # Use a version of run_session that doesn't synchronize
+            # OR pass the outputs dict to avoid internal allocation
+            session.run(static_inputs, static_outputs, stream=capture_stream.cuda_stream)
+            g.capture_end()
+        
+        capture_stream.synchronize()
+
+        # Warmup replays
+        warmup_iters = 5 if len(mat1_l) > 3 else 10
+        for _ in range(warmup_iters):
+            g.replay()
+        
+        torch.cuda.synchronize()
+
+        # Timing runs
+        num_timing_iters = 10
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        
+        start.record()
+        for _ in range(num_timing_iters):
+            g.replay()
+        end.record()
+        
+        torch.cuda.synchronize()
+
+        avg_time_ms = start.elapsed_time(end) / num_timing_iters / len(mat1_l)
+
+        print(f"x shape {mat1_l[0].shape}, "
+            f"weights size {(processed_torch_weights_13.nbytes*2+processed_torch_weights_2.nbytes)/(2**30) :.4f} GB, "
+            f"weight type {'fp16' if wTypeId == 0 else 'int8' if wTypeId == 1 else 'int4'}, "
+            f"tiling dequantization {use_plugin}: "
+            f"{avg_time_ms:.3f} ms")
+
+        return static_outputs['output']
 
     def _run_expert(self, mat1_l, 
                 processed_torch_weights_13, torch_weight_scales_13,
@@ -280,7 +404,7 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
                 processed_torch_weights_13 = ref_torch_weights_13
                 processed_torch_weights_2 = ref_torch_weights_2
 
-        output = self._run_expert(mat1_l, 
+        output = self._run_expert_cudagraph(mat1_l, 
                                   processed_torch_weights_13, torch_weight_scales_13, 
                                   processed_torch_weights_2, torch_weight_scales_2,
                                   dtype, wTypeId,
@@ -330,10 +454,10 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             (512, intermediate, hidden, 1, False, repeat),
             (512, intermediate, hidden, 1, True, repeat),
             (512, intermediate, hidden, 2, True, repeat),
-            # (1024, intermediate, hidden, 0, False, repeat),
-            # (1024, intermediate, hidden, 1, False, repeat),
-            # (1024, intermediate, hidden, 1, True, repeat),
-            # (1024, intermediate, hidden, 2, True, repeat),
+            (1024, intermediate, hidden, 0, False, repeat),
+            (1024, intermediate, hidden, 1, False, repeat),
+            (1024, intermediate, hidden, 1, True, repeat),
+            (1024, intermediate, hidden, 2, True, repeat),
         ],
         name_func=unittest_name_func)
     def test_expert_fp16_act(self, m, n, k, wTypeId, use_plugin, repeat):
