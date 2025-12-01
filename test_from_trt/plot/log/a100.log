@@ -1,7 +1,3 @@
-x shape torch.Size([1024, 6144]), weights size 0.7734 GB, weight type fp16, tiling dequantization False: 2.229 ms
-.x shape torch.Size([1024, 6144]), weights size 0.3867 GB, weight type int8, tiling dequantization False: 2.167 ms
-.x shape torch.Size([1024, 6144]), weights size 0.3867 GB, weight type int8, tiling dequantization True: 3.867 ms
-.x shape torch.Size([1024, 6144]), weights size 0.1934 GB, weight type int4, tiling dequantization True: 3.671 ms
 .x shape torch.Size([128, 6144]), weights size 0.7734 GB, weight type fp16, tiling dequantization False: 0.448 ms
 .x shape torch.Size([128, 6144]), weights size 0.3867 GB, weight type int8, tiling dequantization False: 0.439 ms
 .x shape torch.Size([128, 6144]), weights size 0.3867 GB, weight type int8, tiling dequantization True: 0.646 ms

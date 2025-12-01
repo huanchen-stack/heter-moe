@@ -4,24 +4,86 @@ import numpy as np
 # Define raw data dictionaries for two devices
 data_devices = {
     "A100": [
-        (128,0.611,"fp16",False,0.7734),(128,0.609,"int8",False,0.3867),(128,0.706,"int8",True,0.3867),(128,0.679,"int4",True,0.1934),
-        (16,0.596,"fp16",False,0.7734),(16,0.568,"int8",False,0.3867),(16,0.499,"int8",True,0.3867),(16,0.386,"int4",True,0.1934),
-        (1,0.602,"fp16",False,0.7734),(1,0.554,"int8",False,0.3867),(1,0.457,"int8",True,0.3867),(1,0.327,"int4",True,0.1934),
-        (256,0.759,"fp16",False,0.7734),(256,0.773,"int8",False,0.3867),(256,1.122,"int8",True,0.3867),(256,1.149,"int4",True,0.1934),
-        (32,0.614,"fp16",False,0.7734),(32,0.594,"int8",False,0.3867),(32,0.511,"int8",True,0.3867),(32,0.401,"int4",True,0.1934),
-        (512,1.297,"fp16",False,0.7734),(512,1.286,"int8",False,0.3867),(512,2.016,"int8",True,0.3867),(512,2.064,"int4",True,0.1934),
-        (64,0.598,"fp16",False,0.7734),(64,0.574,"int8",False,0.3867),(64,0.593,"int8",True,0.3867),(64,0.514,"int4",True,0.1934),
-        (8,0.570,"fp16",False,0.7734),(8,0.556,"int8",False,0.3867),(8,0.490,"int8",True,0.3867),(8,0.353,"int4",True,0.1934),
+        (128, 0.448, "fp16", False, 0.7734),
+        (128, 0.439, "int8", False, 0.3867),
+        (128, 0.646, "int8", True,  0.3867),
+        (128, 0.661, "int4", True,  0.1934),
+
+        (16,  0.419, "fp16", False, 0.7734),
+        (16,  0.418, "int8", False, 0.3867),
+        (16,  0.347, "int8", True,  0.3867),
+        (16,  0.217, "int4", True,  0.1934),
+
+        (1,   0.409, "fp16", False, 0.7734),
+        (1,   0.402, "int8", False, 0.3867),
+        (1,   0.314, "int8", True,  0.3867),
+        (1,   0.178, "int4", True,  0.1934),
+
+        (256, 0.599, "fp16", False, 0.7734),
+        (256, 0.597, "int8", False, 0.3867),
+        (256, 1.198, "int8", True,  0.3867),
+        (256, 1.256, "int4", True,  0.1934),
+
+        (32,  0.424, "fp16", False, 0.7734),
+        (32,  0.421, "int8", False, 0.3867),
+        (32,  0.366, "int8", True,  0.3867),
+        (32,  0.237, "int4", True,  0.1934),
+
+        (512, 1.109, "fp16", False, 0.7734),
+        (512, 1.103, "int8", False, 0.3867),
+        (512, 2.305, "int8", True,  0.3867),
+        (512, 2.414, "int4", True,  0.1934),
+
+        (64,  0.421, "fp16", False, 0.7734),
+        (64,  0.422, "int8", False, 0.3867),
+        (64,  0.415, "int8", True,  0.3867),
+        (64,  0.359, "int4", True,  0.1934),
+
+        (8,   0.415, "fp16", False, 0.7734),
+        (8,   0.416, "int8", False, 0.3867),
+        (8,   0.330, "int8", True,  0.3867),
+        (8,   0.196, "int4", True,  0.1934),
     ],
     "H100": [
-        (128,0.384,"fp16",False,0.7734),(128,0.383,"int8",False,0.3867),(128,0.428,"int8",True,0.3867),(128,0.391,"int4",True,0.1934),
-        (16,0.388,"fp16",False,0.7734),(16,0.360,"int8",False,0.3867),(16,0.334,"int8",True,0.3867),(16,0.272,"int4",True,0.1934),
-        (1,0.355,"fp16",False,0.7734),(1,0.361,"int8",False,0.3867),(1,0.285,"int8",True,0.3867),(1,0.190,"int4",True,0.1934),
-        (256,0.436,"fp16",False,0.7734),(256,0.432,"int8",False,0.3867),(256,0.581,"int8",True,0.3867),(256,0.564,"int4",True,0.1934),
-        (32,0.378,"fp16",False,0.7734),(32,0.360,"int8",False,0.3867),(32,0.349,"int8",True,0.3867),(32,0.275,"int4",True,0.1934),
-        (512,0.717,"fp16",False,0.7734),(512,0.685,"int8",False,0.3867),(512,0.985,"int8",True,0.3867),(512,0.910,"int4",True,0.1934),
-        (64,0.385,"fp16",False,0.7734),(64,0.385,"int8",False,0.3867),(64,0.371,"int8",True,0.3867),(64,0.304,"int4",True,0.1934),
-        (8,0.357,"fp16",False,0.7734),(8,0.369,"int8",False,0.3867),(8,0.336,"int8",True,0.3867),(8,0.267,"int4",True,0.1934),
+        (128, 0.327, "fp16", False, 0.7734),
+        (128, 0.327, "int8", False, 0.3867),
+        (128, 0.337, "int8", True,  0.3867),
+        (128, 0.305, "int4", True,  0.1934),
+
+        (16,  0.308, "fp16", False, 0.7734),
+        (16,  0.306, "int8", False, 0.3867),
+        (16,  0.268, "int8", True,  0.3867),
+        (16,  0.201, "int4", True,  0.1934),
+
+        (1,   0.301, "fp16", False, 0.7734),
+        (1,   0.301, "int8", False, 0.3867),
+        (1,   0.234, "int8", True,  0.3867),
+        (1,   0.129, "int4", True,  0.1934),
+
+        (256, 0.371, "fp16", False, 0.7734),
+        (256, 0.353, "int8", False, 0.3867),
+        (256, 0.532, "int8", True,  0.3867),
+        (256, 0.469, "int4", True,  0.1934),
+
+        (32,  0.310, "fp16", False, 0.7734),
+        (32,  0.312, "int8", False, 0.3867),
+        (32,  0.275, "int8", True,  0.3867),
+        (32,  0.209, "int4", True,  0.1934),
+
+        (512, 0.644, "fp16", False, 0.7734),
+        (512, 0.615, "int8", False, 0.3867),
+        (512, 0.899, "int8", True,  0.3867),
+        (512, 0.824, "int4", True,  0.1934),
+
+        (64,  0.316, "fp16", False, 0.7734),
+        (64,  0.310, "int8", False, 0.3867),
+        (64,  0.290, "int8", True,  0.3867),
+        (64,  0.231, "int4", True,  0.1934),
+
+        (8,   0.306, "fp16", False, 0.7734),
+        (8,   0.306, "int8", False, 0.3867),
+        (8,   0.266, "int8", True,  0.3867),
+        (8,   0.199, "int4", True,  0.1934),
     ]
 }
 
@@ -81,19 +143,19 @@ for ax, (device, raw_data) in zip(axes, data_devices.items()):
             if q4 < base:
                 speedup = base / q4
                 ax.text(idx + 1.9*width, q4 + 0.02, f"x{speedup:.1f}",
-                        ha="center", color="maroon", fontsize=9)
+                        ha="center", color="maroon", fontsize=9.5)
 
 axes[-1].set_xticks(batch_sizes_arr)
 axes[-1].set_xticklabels(batch_sizes)
 axes[-1].set_xlabel("Batch Size")
-axes[0].set_ylabel("Runtime (ms)")
-axes[1].set_ylabel("Runtime (ms)")
+axes[0].set_ylabel("Runtime (ms)", fontsize=11)
+axes[1].set_ylabel("Runtime (ms)", fontsize=11)
 
 # ------- SHARED LEGEND -------
 # Use the handles from the last axes
 handles, labels = axes[-1].get_legend_handles_labels()
-fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.33, 0.84),
-           ncol=1, fontsize=9)
+fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.38, 0.843),
+           ncol=1, fontsize=11)
 
 # ------- TITLE WITH PROPER SPACING -------
 fig.suptitle("Mixtral-8x22B Per-Expert Runtime Comparison\n"
