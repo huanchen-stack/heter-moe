@@ -27,7 +27,7 @@ from utils.util import create_session, run_session, unittest_name_func
 
 import tensorrt_llm
 from tensorrt_llm import Tensor
-from tensorrt_llm.functional import constant, matmul
+from tensorrt_llm.functional import constant, matmul, silu
 from tensorrt_llm.quantization.functional import weight_only_quant_matmul
 
 
@@ -57,9 +57,9 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
         with tensorrt_llm.net_guard(network):
 
             # Create separate TRT inputs with unique names
-            x_l = []
+            x_repeat = []
             for i, mat1 in enumerate(mat1_l):
-                x_l.append(
+                x_repeat.append(
                     Tensor(
                         name=f'x_{i}',
                         shape=mat1.shape,
@@ -72,7 +72,7 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             scale = constant(torch_to_numpy(torch_weight_scales))
 
             output = None
-            for i, x in enumerate(x_l):
+            for i, x in enumerate(x_repeat):
                 if wTypeId == 0:
                     out_i = matmul(x, weights)
                 else:
@@ -102,7 +102,7 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
 
         # Warmup
         if len(mat1_l) > 3:  # for multiple inputs, do fewer warmup runs
-            [ run_session(session, inputs) for _ in range(2) ]
+            [ run_session(session, inputs) for _ in range(5) ]
         else:
             [ run_session(session, inputs) for _ in range(10) ]
 
@@ -121,7 +121,6 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             f"{start.elapsed_time(end):.3f} ms")
 
         return outputs['output']
-
 
     def _woq_matmul(self, m, n, k, dtype, wTypeId, use_plugin=True, repeat=1):
         # Init operands for multiplication in int32
@@ -164,9 +163,139 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
         '''
 
 
-    hidden=8192
-    intermediate=28672
-    repeat=20
+    def _run_expert(self, mat1_l, 
+                processed_torch_weights_13, torch_weight_scales_13,
+                processed_torch_weights_2, torch_weight_scales_2,
+                dtype, wTypeId, use_plugin):
+
+        builder = tensorrt_llm.Builder()
+        network = builder.create_network()
+
+        if use_plugin:
+            network.plugin_config.weight_only_quant_matmul_plugin = dtype
+
+        with tensorrt_llm.net_guard(network):
+
+            # Create separate TRT inputs with unique names
+            x_repeat = []
+            for i, mat1 in enumerate(mat1_l):
+                x_repeat.append(
+                    Tensor(
+                        name=f'x_{i}',
+                        shape=mat1.shape,
+                        dtype=tensorrt_llm._utils.str_dtype_to_trt(dtype)
+                    )
+                )
+
+            # Build weight constants
+            weights_13 = constant(torch_to_numpy(processed_torch_weights_13))
+            scale_13 = constant(torch_to_numpy(torch_weight_scales_13))
+            weights_2 = constant(torch_to_numpy(processed_torch_weights_2))
+            scale_2 = constant(torch_to_numpy(torch_weight_scales_2))
+
+            output = None
+            for i, x in enumerate(x_repeat):
+                if wTypeId == 0:
+                    gate = matmul(x, weights_13, transa=False, transb=False)
+                    up = matmul(x, weights_13, transa=False, transb=False)
+                    act = silu(up) * gate
+                    out_i = matmul(act, weights_2, transa=False, transb=False)
+
+                else:
+                    gate = weight_only_quant_matmul(
+                        x, weights_13, scale_13, wTypeId, dtype=dtype
+                    )
+                    up = weight_only_quant_matmul(
+                        x, weights_13, scale_13, wTypeId, dtype=dtype
+                    )
+                    act = silu(up) * gate
+                    out_i = weight_only_quant_matmul(
+                        act, weights_2, scale_2, wTypeId, dtype=dtype
+                    )
+
+                if output is None:
+                    output = out_i
+                else:
+                    output = output + out_i
+
+            output.mark_output('output', dtype)
+
+        # Build engine
+        session = create_session(
+            builder, network,
+            precision=dtype,
+            int8=True,
+            # memory_pool_limit=133554432
+        )
+
+        # IMPORTANT: Build correct runtime inputs
+        inputs = {}
+        for i, mat1 in enumerate(mat1_l):
+            inputs[f'x_{i}'] = mat1  # Each TRT input name must match
+
+        # Warmup
+        if len(mat1_l) > 3:  # for multiple inputs, do fewer warmup runs
+            [ run_session(session, inputs) for _ in range(2) ]
+        else:
+            [ run_session(session, inputs) for _ in range(10) ]
+
+        # Timing run
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+
+        start.record()
+        outputs = run_session(session, inputs)
+        end.record()
+        torch.cuda.synchronize()
+
+        print(f"x shape {mat1_l[0].shape}, "
+            f"weights size {(processed_torch_weights_13.nbytes*2+processed_torch_weights_2.nbytes)/(2**30) :.4f} GB, "
+            f"weight type {'fp16' if wTypeId == 0 else 'int8' if wTypeId == 1 else 'int4'}, "
+            f"tiling dequantization {use_plugin}: "
+            f"{start.elapsed_time(end)/len(mat1_l):.3f} ms")
+
+        return outputs['output']
+
+    def _woq_expert(self, batch, intermediate, hidden, dtype, wTypeId, use_plugin=True, repeat=1):
+        mat1_l = [ _utils.woq_gen_weights(batch, hidden, dtype) for _ in range(repeat) ]
+        mat1 = mat1_l[0]
+        weight_13 = _utils.woq_gen_weights(hidden, intermediate, dtype)
+        weight_2 = _utils.woq_gen_weights(intermediate, hidden, dtype)
+
+        if wTypeId == 0:
+            processed_torch_weights_13 = weight_13
+            torch_weight_scales_13 = torch.ones(intermediate, dtype=_utils.woq_torch_dtype(dtype),
+                                             device='cuda')
+            processed_torch_weights_2 = weight_2
+            torch_weight_scales_2 = torch.ones(hidden, dtype=_utils.woq_torch_dtype(dtype),
+                                             device='cuda')
+        else:
+            ref_torch_weights_13, processed_torch_weights_13, torch_weight_scales_13 = _utils.woq_conversion(
+                weight_13, wTypeId)
+            ref_torch_weights_2, processed_torch_weights_2, torch_weight_scales_2 = _utils.woq_conversion(
+                weight_2, wTypeId)
+        
+            if not use_plugin:
+                processed_torch_weights_13 = ref_torch_weights_13
+                processed_torch_weights_2 = ref_torch_weights_2
+
+        output = self._run_expert(mat1_l, 
+                                  processed_torch_weights_13, torch_weight_scales_13, 
+                                  processed_torch_weights_2, torch_weight_scales_2,
+                                  dtype, wTypeId,
+                                  use_plugin)
+
+    # hidden=5120  # qwen2.5-32B
+    # intermediate=27648
+    # hidden=8192  # llama3-70B
+    # intermediate=28672
+    hidden=4096  # mixtral-8x7B
+    intermediate=14336
+    hidden=6144  # mixtral-8x22B
+    intermediate=22528
+
+    repeat=1
     @parameterized.expand(
         [
             (1, intermediate, hidden, 0, False, repeat),
@@ -175,8 +304,19 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
             (1, intermediate, hidden, 2, True, repeat),
         ],
         name_func=unittest_name_func)
-    def test_matmul_fp16_act(self, m, n, k, wTypeId, use_plugin, repeat):
-        self._woq_matmul(m, n, k, 'float16', wTypeId, use_plugin, repeat)
+    def test_expert_fp16_act(self, m, n, k, wTypeId, use_plugin, repeat):
+        self._woq_expert(m, n, k, 'float16', wTypeId, use_plugin, repeat)
+    
+    # @parameterized.expand(
+    #     [
+    #         (1, intermediate, hidden, 0, False, repeat),
+    #         (1, intermediate, hidden, 1, False, repeat),
+    #         (1, intermediate, hidden, 1, True, repeat),
+    #         (1, intermediate, hidden, 2, True, repeat),
+    #     ],
+    #     name_func=unittest_name_func)
+    # def test_matmul_fp16_act(self, m, n, k, wTypeId, use_plugin, repeat):
+    #     self._woq_matmul(m, n, k, 'float16', wTypeId, use_plugin, repeat)
 
     # @parameterized.expand(
     #     [
