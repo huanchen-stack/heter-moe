@@ -5,6 +5,7 @@ import numpy as np
 # hidden=6144, intermediate=22528
 # Columns: (batch_size, runtime_ms, weight_type, tiling_dequant, weights_size_GB)
 # Device: A100
+device = "A100"
 raw_data = [
     (128,0.611,"fp16",False,0.7734),(128,0.609,"int8",False,0.3867),(128,0.706,"int8",True,0.3867),(128,0.679,"int4",True,0.1934),
     (16,0.596,"fp16",False,0.7734),(16,0.568,"int8",False,0.3867),(16,0.499,"int8",True,0.3867),(16,0.386,"int4",True,0.1934),
@@ -19,6 +20,7 @@ raw_data = [
 # hidden=6144, intermediate=22528
 # Columns: (batch_size, runtime_ms, weight_type, tiling_dequant, weights_size_GB)
 # Device: H100
+device = "H100"
 raw_data = [
     (128,0.384,"fp16",False,0.7734),(128,0.383,"int8",False,0.3867),(128,0.428,"int8",True,0.3867),(128,0.391,"int4",True,0.1934),
     (16,0.388,"fp16",False,0.7734),(16,0.360,"int8",False,0.3867),(16,0.334,"int8",True,0.3867),(16,0.272,"int4",True,0.1934),
@@ -86,30 +88,30 @@ colors = {
 x = np.arange(len(batch_sizes))
 width = 0.2
 
-plt.figure(figsize=(14,7))
+plt.figure(figsize=(8,4))
 
-plt.bar(x - 1.5*width, a16w16, width, label="a16w16 FP16 (0.773 GB)", color=colors["a16w16"])
-plt.bar(x - 0.5*width, a16w8_full, width, label="a16w8 full dequant (0.387 GB)", color=colors["a16w8_full"])
-plt.bar(x + 0.5*width, a16w8_tile, width, label="a16w8 tile dequant (0.387 GB)", color=colors["a16w8_tile"])
-plt.bar(x + 1.5*width, a16w4_tile, width, label="a16w4 tile dequant (0.193 GB)", color=colors["a16w4_tile"])
+plt.bar(x - 1.5*width, a16w16, width, label="a16w16 FP16 size(weight)=0.773 GB", color=colors["a16w16"])
+plt.bar(x - 0.5*width, a16w8_full, width, label="a16w8 full dequant size(weight)=0.387 GB", color=colors["a16w8_full"])
+plt.bar(x + 0.5*width, a16w8_tile, width, label="a16w8 tile dequant size(weight)=0.387 GB", color=colors["a16w8_tile"])
+plt.bar(x + 1.5*width, a16w4_tile, width, label="a16w4 tile dequant size(weight)=0.193 GB", color=colors["a16w4_tile"])
 
 plt.xticks(x, batch_sizes)
 plt.xlabel("Batch Size")
 plt.ylabel("Runtime (ms)")
-plt.title("Mixtral-8x22B Per Expert Runtime vs Batch Size\nhidden=6144, intermediate=22528   Device: H100")
+plt.title(f"Mixtral-8x22B Per Expert Runtime\nhidden=6144, intermediate=22528   Device: {device}")
 # plt.title("Mixtral-8x7B Expert Runtime vs Batch Size\nhidden=4096, intermediate=14336")
 plt.grid(axis="y", linestyle="--", alpha=0.4)
 plt.legend()
 
 # Speedup annotations for batch sizes where speedup > 1
-interesting_batches = [1,8,16,32, 64]
+interesting_batches = [1,8,16,32,64]
 for b in interesting_batches:
     idx = batch_sizes.index(b)
     base = a16w16[idx]
     q4 = a16w4_tile[idx]
     if q4 < base:  # speedup only if faster
         speedup = base / q4
-        plt.text(idx + 1.5*width, q4 + 0.02, f"x{speedup:.1f}", ha="center", color="black", fontsize=10)
+        plt.text(idx + 1.9*width, q4 + 0.02, f"x{speedup:.1f}", ha="center", color="maroon", fontsize=9)
 
 plt.tight_layout()
-plt.savefig("mixtral_8x22b_h100.png")
+plt.savefig(f"mixtral_8x22b_{device.lower()}.png")
