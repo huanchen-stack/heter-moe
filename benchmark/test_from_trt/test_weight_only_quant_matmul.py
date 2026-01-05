@@ -416,8 +416,12 @@ class TestWeightOnlyQuantMatmul(unittest.TestCase):
     # intermediate=28672
     # hidden=4096  # mixtral-8x7B
     # intermediate=14336
-    hidden=6144  # mixtral-8x22B
-    intermediate=22528
+    # hidden=6144  # mixtral-8x22B
+    # intermediate=22528
+
+    hidden=2048 # qwen3-30B-A3B
+    intermediate=768
+    # intermediate=6144
 
     repeat=1
     @parameterized.expand(

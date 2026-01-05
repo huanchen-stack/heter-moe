@@ -2,50 +2,65 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import FuncFormatter
 
-# Define raw data for A100 only
+# Define raw data for RTX6000 only
 data_devices = {
-    "A100": [
-        (128, 0.448, "fp16", False, 0.7734),
-        (128, 0.439, "int8", False, 0.3867),
-        (128, 0.646, "int8", True,  0.3867),
-        (128, 0.661, "int4", True,  0.1934),
+    "RTX6000": [
+        # batch = 1024
+        (1024, 0.085, "fp16", False, 0.0088),
+        (1024, 0.084, "int8", False, 0.0044),
+        (1024, 0.150, "int8", True,  0.0044),
+        (1024, 0.132, "int4", True,  0.0022),
 
-        (16,  0.419, "fp16", False, 0.7734),
-        (16,  0.418, "int8", False, 0.3867),
-        (16,  0.347, "int8", True,  0.3867),
-        (16,  0.217, "int4", True,  0.1934),
+        # batch = 128
+        (128,  0.036, "fp16", False, 0.0088),
+        (128,  0.035, "int8", False, 0.0044),
+        (128,  0.056, "int8", True,  0.0044),
+        (128,  0.059, "int4", True,  0.0022),
 
-        (1,   0.409, "fp16", False, 0.7734),
-        (1,   0.402, "int8", False, 0.3867),
-        (1,   0.314, "int8", True,  0.3867),
-        (1,   0.178, "int4", True,  0.1934),
+        # batch = 16
+        (16,   0.027, "fp16", False, 0.0088),
+        (16,   0.026, "int8", False, 0.0044),
+        (16,   0.054, "int8", True,  0.0044),
+        (16,   0.057, "int4", True,  0.0022),
 
-        (256, 0.599, "fp16", False, 0.7734),
-        (256, 0.597, "int8", False, 0.3867),
-        (256, 1.198, "int8", True,  0.3867),
-        (256, 1.256, "int4", True,  0.1934),
+        # batch = 1
+        (1,    0.017, "fp16", False, 0.0088),
+        (1,    0.017, "int8", False, 0.0044),
+        (1,    0.021, "int8", True,  0.0044),
+        (1,    0.027, "int4", True,  0.0022),
 
-        (32,  0.424, "fp16", False, 0.7734),
-        (32,  0.421, "int8", False, 0.3867),
-        (32,  0.366, "int8", True,  0.3867),
-        (32,  0.237, "int4", True,  0.1934),
+        # batch = 256
+        (256,  0.047, "fp16", False, 0.0088),
+        (256,  0.047, "int8", False, 0.0044),
+        (256,  0.068, "int8", True,  0.0044),
+        (256,  0.072, "int4", True,  0.0022),
 
-        (512, 1.109, "fp16", False, 0.7734),
-        (512, 1.103, "int8", False, 0.3867),
-        (512, 2.305, "int8", True,  0.3867),
-        (512, 2.414, "int4", True,  0.1934),
+        # batch = 32
+        (32,   0.027, "fp16", False, 0.0088),
+        (32,   0.027, "int8", False, 0.0044),
+        (32,   0.056, "int8", True,  0.0044),
+        (32,   0.057, "int4", True,  0.0022),
 
-        (64,  0.421, "fp16", False, 0.7734),
-        (64,  0.422, "int8", False, 0.3867),
-        (64,  0.415, "int8", True,  0.3867),
-        (64,  0.359, "int4", True,  0.1934),
+        # batch = 512
+        (512,  0.064, "fp16", False, 0.0088),
+        (512,  0.064, "int8", False, 0.0044),
+        (512,  0.099, "int8", True,  0.0044),
+        (512,  0.097, "int4", True,  0.0022),
 
-        (8,   0.415, "fp16", False, 0.7734),
-        (8,   0.416, "int8", False, 0.3867),
-        (8,   0.330, "int8", True,  0.3867),
-        (8,   0.196, "int4", True,  0.1934),
+        # batch = 64
+        (64,   0.033, "fp16", False, 0.0088),
+        (64,   0.031, "int8", False, 0.0044),
+        (64,   0.055, "int8", True,  0.0044),
+        (64,   0.060, "int4", True,  0.0022),
+
+        # batch = 8
+        (8,    0.025, "fp16", False, 0.0088),
+        (8,    0.025, "int8", False, 0.0044),
+        (8,    0.041, "int8", True,  0.0044),
+        (8,    0.044, "int4", True,  0.0022),
     ]
 }
+
 
 def extract_series(raw_data, weight_type, tiling, batch_range):
     batch_sizes = sorted([b for (b,_,_,_,_) in raw_data if b in batch_range])
@@ -64,7 +79,7 @@ batch_range = [8, 16, 32, 64, 128, 256, 512]
 
 fig, ax = plt.subplots(1, 1, figsize=(4, 3))
 
-raw_data = data_devices["A100"]
+raw_data = data_devices["RTX6000"]
 bs_fp16, a16w16 = extract_series(raw_data, "fp16", False, batch_range)
 bs_int4, a16w4_tile = extract_series(raw_data, "int4", True, batch_range)
 
@@ -104,7 +119,7 @@ for i, bs in enumerate(bs_fp16):
         #        fontsize=9, color='darkgreen', fontweight='bold',
         #        ha='left', va='center')
 
-ax.set_title("Mixtral-8x22B Per-Expert Runtime on A100\nhidden=6144, intermediate=22528", 
+ax.set_title("Qwen 8-Expert Runtime on RTX6000\nhidden=6144, intermediate=22528", 
              fontsize=12)
 ax.grid(True, linestyle="--", alpha=0.4, which='both')
 ax.set_ylabel("Runtime (ms)", fontsize=11)
@@ -114,5 +129,4 @@ ax.set_xticklabels(batch_range)
 ax.legend(fontsize=10)
 
 plt.tight_layout()
-# plt.savefig("mixtral_8x22b_a100_lineplot.pdf", bbox_inches='tight')
-plt.savefig("mixtral_8x22b_a100_lineplot.png", dpi=300, bbox_inches='tight')
+plt.savefig("qwen_30b_a3b_RTX6000_lineplot.png", dpi=300, bbox_inches='tight')
