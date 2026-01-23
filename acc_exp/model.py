@@ -23,6 +23,8 @@ def select_experts_to_quantize(
         criteria: QuantizationCriteria = QuantizationCriteria.RANDOM,
         custom_fn=None
     ):
+    # print(topk_indices)
+    # print(topk_weights)
 
     unique_experts = topk_indices.unique().tolist()
     num_to_quantize = int(len(unique_experts) * quantize_ratio)
@@ -70,6 +72,7 @@ def select_experts_to_quantize(
     else:
         raise ValueError(f"Unknown criteria: {criteria}")
     
+    # print(f"Selected experts to quantize: {experts_to_quantize}")
     return list(experts_to_quantize)
 
 class MultiPrecisionMoEModel:
@@ -79,6 +82,7 @@ class MultiPrecisionMoEModel:
             cache_dir="/models/",
             quantization_dtypes=[Precision.MXFP8],
             quantized_cache_dir="/models/quantized_experts/",
+            offload=True,
             force_quantization=True,
             autostore_quantized_experts=False
         ):
@@ -88,6 +92,7 @@ class MultiPrecisionMoEModel:
 
         quantized_cache_dir = Path(quantized_cache_dir) / model_name.replace("/", "_")
         quantized_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.offload = offload
 
         print("Downloading tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -115,8 +120,8 @@ class MultiPrecisionMoEModel:
             self._load_quantized_experts(quantized_cache_dir)
         if not self.quantized_experts:
             self._quantize_experts()
-        if autostore_quantized_experts:
-            self._save_quantized_experts(quantized_cache_dir)
+            if autostore_quantized_experts:
+                self._save_quantized_experts(quantized_cache_dir)
         
         self._hook_handles = []
 
@@ -141,6 +146,7 @@ class MultiPrecisionMoEModel:
                 quant_linear = create_fake_quantized_module(
                     module, precision=precision
                 )
+                quant_linear.to(device="cpu" if self.offload else "cuda")
 
                 self.quantized_experts[precision.value][(layer_id, expert_id)][proj_type] = quant_linear
         print("Quantization of experts complete.")
@@ -148,7 +154,7 @@ class MultiPrecisionMoEModel:
     def _load_quantized_experts(self, quantized_cache_dir: Path):
         quantized_experts_path = quantized_cache_dir / "quantized_experts.pt"
         if quantized_experts_path.exists():
-            self.quantized_experts = torch.load(quantized_experts_path)
+            self.quantized_experts = torch.load(quantized_experts_path, weights_only=False)
             print("Loaded quantized experts from cache.")
         else:
             print("No cached quantized experts found.")
@@ -172,12 +178,15 @@ class MultiPrecisionMoEModel:
             quant_expert["up_proj"],
             quant_expert["down_proj"]
         )
+        gate_proj.to(device=hidden_states.device)
+        up_proj.to(device=hidden_states.device)
+        down_proj.to(device=hidden_states.device)
+
         gate_out = gate_proj(hidden_states)
         up_out = up_proj(hidden_states)
 
-        assert isinstance(self.model.model.layers[0].mlp.experts[0].act_fn, torch.nn.SiLU), \
-            f"Expected SiLU activation, got {type(self.model.model.layers[0].mlp.experts[0].act_fn)}"
-        activated = torch.nn.functional.silu(gate_out) * up_out
+        act_fn = self.model.model.layers[0].mlp.experts[0].act_fn
+        activated = act_fn(gate_out) * up_out
         
         output = down_proj(activated)
         return output
@@ -187,37 +196,39 @@ class MultiPrecisionMoEModel:
             quantize_ratio: float=0.5,
             criteria: QuantizationCriteria=QuantizationCriteria.RANDOM,
             custom_fn=None,
-            experts_to_quantize=None
+            # experts_to_quantize=None
         ):
         moe_layer = self.model.model.layers[layer_id].mlp
         num_experts_per_tok = self.model.config.num_experts_per_tok
         num_experts = self.model.config.num_experts
         
         def moe_hook(module, input, output):
+            # nonlocal experts_to_quantize
+
             # Handle tuple output
             if isinstance(output, tuple):
                 hidden_output, rest = output[0], output[1:]
             else:
                 hidden_output, rest = output, None
-            
+
             hidden_states = input[0]  # (batch, seq_len, hidden_dim)
             batch_size, seq_len, hidden_dim = hidden_states.shape
-            
+
             # Get router decisions
             gate = module.gate
             router_logits = gate(hidden_states)  # (batch, seq_len, num_experts)
             topk_weights, topk_indices = torch.topk(router_logits, num_experts_per_tok, dim=-1)
             topk_weights = torch.softmax(topk_weights, dim=-1)
-            
-            if not experts_to_quantize:
-                experts_to_quantize = select_experts_to_quantize(
-                    topk_indices=topk_indices,
-                    topk_weights=topk_weights,
-                    quantize_ratio=quantize_ratio,
-                    criteria=criteria,
-                    num_experts=num_experts,
-                    custom_fn=custom_fn,
-                )
+
+            # if experts_to_quantize is not None:
+            experts_to_quantize = select_experts_to_quantize(
+                topk_indices=topk_indices,
+                topk_weights=topk_weights,
+                quantize_ratio=quantize_ratio,
+                criteria=criteria,
+                num_experts=num_experts,
+                custom_fn=custom_fn,
+            )
             
             if not experts_to_quantize:
                 return output
@@ -233,8 +244,9 @@ class MultiPrecisionMoEModel:
                     for pos in range(num_experts_per_tok):
                         expert_id = token_topk_indices[pos].item()
                         
+                        # print(f"Layer {layer_id}, Token ({b},{s}), Expert {expert_id}, Experts to quantize: {experts_to_quantize}")
                         if expert_id not in experts_to_quantize:
-                            print(f"Skipping expert {expert_id}: Not in quantization list.")
+                            print(f"Skipping expert {layer_id}-{expert_id}: Not in quantization list.")
                             continue
                         
                         expert_weight = token_topk_weights[pos]
@@ -264,26 +276,6 @@ class MultiPrecisionMoEModel:
         print(f"Registered layer override hook for layer {layer_id} with precision {precision.value}.")
         
         return handle
-
-    def register_all_layers(
-            self, precision: Precision=Precision.MXFP8, 
-            layer_hooks=True,
-            expert_hooks=False,
-            layer_ids=None, expert_ids=None
-        ):
-        layer_ids = layer_ids if layer_ids is not None else range(len(self.model.model.layers))
-        layer_hooks = not expert_hooks
-        if layer_hooks:
-            for layer_id in layer_ids:
-                self.register_layer_override_hooks(layer_id, precision)
-            print("Registered all layer override hooks.")
-        if expert_hooks:
-            for layer_id in layer_ids:
-                num_experts = self.model.config.num_experts
-                expert_ids = expert_ids if expert_ids is not None else range(num_experts)
-                for expert_id in expert_ids:
-                    self.register_expert_override_hook(layer_id, expert_id, precision)
-            print("Registered all expert override hooks.")
 
     def register_expert_override_hook(self, layer_id: int, expert_id: int, precision: Precision):
         key = (layer_id, expert_id)
@@ -320,18 +312,74 @@ class MultiPrecisionMoEModel:
                     module._forward_pre_hooks.clear()
             print("Done.")
 
+    def quantize_all_experts(
+            self, precision: Precision=Precision.MXFP8,
+            layer_ids=None, expert_ids=None
+        ):
+        layer_ids = layer_ids if layer_ids is not None else range(len(self.model.model.layers))
+        for layer_id in layer_ids:
+            num_experts = self.model.config.num_experts
+            expert_ids = expert_ids if expert_ids is not None else range(num_experts)
+            for expert_id in expert_ids:
+                self.register_expert_override_hook(layer_id, expert_id, precision)
+        print("Registered all expert override hooks.")
+
+    def quantize_all_layers(
+            self, precision: Precision=Precision.MXFP8, quantize_ratio: float=0.5,
+            layer_ids=None, expert_ids=None
+        ):
+        layer_ids = layer_ids if layer_ids is not None else range(len(self.model.model.layers))
+        for layer_id in layer_ids:
+            self.register_layer_override_hooks(layer_id, precision, quantize_ratio)
+        print("Registered all layer override hooks.")
+
+    def generate(self, prompts, max_new_tokens=20):
+        inputs = self.tokenizer(
+            prompts, return_tensors="pt", padding=True, padding_side="left"
+        ).to(self.model.device)
+        outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        return self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+
 if __name__ == "__main__":
     model = MultiPrecisionMoEModel(
-        model_name="allenai/OLMoE-1B-7B-0924",
-        quantization_dtypes=[Precision.MXFP8, Precision.MXFP4]
+        model_name="Qwen/Qwen3-30B-A3B",
+        quantization_dtypes=[
+            # Precision.MXFP8, 
+            Precision.MXFP4
+        ],
+        force_quantization=False,
+        autostore_quantized_experts=True
     )
-    print("Model and quantized experts ready.")
-    sample_layer, sample_expert = 0, 0
-    print(f"Sample quantized expert for layer {sample_layer}, expert {sample_expert}:")
-    print(model.quantized_experts[Precision.MXFP8.value][(sample_layer, sample_expert)]["down_proj"].weight)
-    print(model.quantized_experts[Precision.MXFP4.value][(sample_layer, sample_expert)]["down_proj"].weight)
-    print("Done.")
 
-    # TODO:
-    #   1. Add more tests
-    #   2. Test with Qwen
+    r = []
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=50)
+    # model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=50)
+    # model.clear_hooks()
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=50)
+    model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
+    r += model.generate([
+            "The quick brown fox", 
+            "Once upon a time in a land far away"
+        ], max_new_tokens=100)
+    model.clear_hooks()
+    r += model.generate([
+            "The quick brown fox", 
+            "Once upon a time in a land far away"
+        ], max_new_tokens=100)
+    
+    for res in r:
+        print("=======")
+        print(res)
+        print("=======")
+        print()
