@@ -1,0 +1,18 @@
+[
+  {
+    "config": "mxfp8_100pct",
+    "precision": "mxfp8",
+    "quantize_ratio": 1.0,
+    "perplexity": 14.4375,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:35:17.716992"
+  },
+  {
+    "config": "mxfp4_100pct",
+    "precision": "mxfp4",
+    "quantize_ratio": 1.0,
+    "perplexity": 16.625,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:35:23.950780"
+  }
+]

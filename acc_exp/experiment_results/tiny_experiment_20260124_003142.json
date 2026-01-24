@@ -1,0 +1,42 @@
+[
+  {
+    "config": "baseline",
+    "precision": "fp16/bf16",
+    "quantize_ratio": 0.0,
+    "perplexity": 13.8125,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:31:20.885632"
+  },
+  {
+    "config": "mxfp8_50pct",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 14.4375,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:31:25.593501"
+  },
+  {
+    "config": "mxfp8_100pct",
+    "precision": "mxfp8",
+    "quantize_ratio": 1.0,
+    "perplexity": 14.4375,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:31:31.316138"
+  },
+  {
+    "config": "mxfp4_50pct",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 14.6875,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:31:36.082513"
+  },
+  {
+    "config": "mxfp4_100pct",
+    "precision": "mxfp4",
+    "quantize_ratio": 1.0,
+    "perplexity": 16.625,
+    "num_tokens": 99,
+    "timestamp": "2026-01-24T00:31:42.107538"
+  }
+]

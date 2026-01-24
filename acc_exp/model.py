@@ -2,9 +2,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from pathlib import Path
 import torch
 import re
+import logging
 from enum import Enum
 
 from quantization import create_fake_quantized_module, Precision
+
+logger = logging.getLogger(__name__)
 
 
 class QuantizationCriteria(Enum):
@@ -38,7 +41,7 @@ def select_experts_to_quantize(
     
     elif criteria in [QuantizationCriteria.LOWEST_WEIGHT_SUM, QuantizationCriteria.HIGHEST_WEIGHT_SUM]:
         # Sum routing weights for each expert across batch
-        weight_sums = torch.zeros(num_experts, device=topk_weights.device)
+        weight_sums = torch.zeros(num_experts, device=topk_weights.device, dtype=topk_weights.dtype)
         flat_indices = topk_indices.flatten()  # (batch * seq_len * top_k,)
         flat_weights = topk_weights.flatten()  # (batch * seq_len * top_k,)
         weight_sums.scatter_add_(0, flat_indices, flat_weights)
@@ -97,24 +100,24 @@ class MultiPrecisionMoEModel:
         self.decoding_only = decoding_only
         self.offload = offload
 
-        print("Downloading tokenizer...")
+        logger.info("Downloading tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, 
             cache_dir=cache_dir
         )
 
-        print("Downloading model...")
+        logger.info("Downloading model...")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             dtype="auto",
             device_map="auto",
             cache_dir=cache_dir
         )
-        print("Done!")
+        logger.info("Model loaded.")
         
         self.quantization_dtypes = quantization_dtypes
 
-        print("Quantizing experts... to precisions:", 
+        logger.info("Quantizing experts to precisions: %s",
               [p.value for p in quantization_dtypes])
 
         self.quantized_experts = None
@@ -152,22 +155,22 @@ class MultiPrecisionMoEModel:
                 quant_linear.to(device="cpu" if self.offload else "cuda", non_blocking=True)
 
                 self.quantized_experts[precision.value][(layer_id, expert_id)][proj_type] = quant_linear
-        print("Quantization of experts complete.")
+        logger.info("Quantization of experts complete.")
 
     def _load_quantized_experts(self, quantized_cache_dir: Path):
         quantized_experts_path = quantized_cache_dir / "quantized_experts.pt"
         if quantized_experts_path.exists():
             self.quantized_experts = torch.load(quantized_experts_path, weights_only=False)
-            print("Loaded quantized experts from cache.")
+            logger.info("Loaded quantized experts from cache.")
         else:
-            print("No cached quantized experts found.")
+            logger.debug("No cached quantized experts found.")
     
     def _save_quantized_experts(self, quantized_cache_dir: Path):
         torch.save(
             self.quantized_experts, 
             quantized_cache_dir / "quantized_experts.pt"
         )
-        print("Saved quantized experts to cache.")
+        logger.info("Saved quantized experts to cache.")
 
     def _forward_quantized_expert(
             self, layer_id: int, expert_id: int, precision: Precision, 
@@ -205,15 +208,12 @@ class MultiPrecisionMoEModel:
             quantize_ratio: float=0.5,
             criteria: QuantizationCriteria=QuantizationCriteria.RANDOM,
             custom_fn=None,
-            # experts_to_quantize=None
         ):
         moe_layer = self.model.model.layers[layer_id].mlp
         num_experts_per_tok = self.model.config.num_experts_per_tok
         num_experts = self.model.config.num_experts
-        
-        def moe_hook(module, input, output):
-            # nonlocal experts_to_quantize
 
+        def moe_hook(module, input, output):
             # Handle tuple output
             if isinstance(output, tuple):
                 hidden_output, rest = output[0], output[1:]
@@ -223,13 +223,15 @@ class MultiPrecisionMoEModel:
             hidden_states = input[0]  # (batch, seq_len, hidden_dim)
             batch_size, seq_len, hidden_dim = hidden_states.shape
 
+            if self.decoding_only and seq_len == 0:
+                return output
+
             # Get router decisions
             gate = module.gate
             router_logits = gate(hidden_states)  # (batch, seq_len, num_experts)
             topk_weights, topk_indices = torch.topk(router_logits, num_experts_per_tok, dim=-1)
             topk_weights = torch.softmax(topk_weights, dim=-1)
 
-            # if experts_to_quantize is not None:
             experts_to_quantize = select_experts_to_quantize(
                 topk_indices=topk_indices,
                 topk_weights=topk_weights,
@@ -238,44 +240,61 @@ class MultiPrecisionMoEModel:
                 num_experts=num_experts,
                 custom_fn=custom_fn,
             )
-            
+
             if not experts_to_quantize:
                 return output
-            
-            # Modify output for quantized experts
-            modified_output = hidden_output.clone()
-            
-            for b in range(batch_size):
-                if self.decoding_only and seq_len == 0:
+
+            # Flatten for vectorized processing: (batch * seq_len, hidden_dim)
+            flat_hidden = hidden_states.view(-1, hidden_dim)
+            # (batch * seq_len, num_experts_per_tok)
+            flat_topk_indices = topk_indices.view(-1, num_experts_per_tok)
+            flat_topk_weights = topk_weights.view(-1, num_experts_per_tok)
+            num_tokens = flat_hidden.shape[0]
+
+            # Accumulate corrections: delta = quant_out - original_out
+            delta = torch.zeros_like(flat_hidden)  # (batch * seq_len, hidden_dim)
+
+            # Process each quantized expert in a batched manner
+            # Loop over ~16 experts instead of ~16K tokens
+            for expert_id in experts_to_quantize:
+                # Find all (token_idx, topk_pos) where this expert is selected
+                mask = (flat_topk_indices == expert_id)  # (num_tokens, num_experts_per_tok)
+
+                if not mask.any():
                     continue
-                for s in range(seq_len):   # USING DOUBLE FOR LOOP FOR FUTURE SELECTION WITHIN SEQ
-                    token_topk_indices = topk_indices[b, s, :]  # (top_k,)
-                    token_topk_weights = topk_weights[b, s, :]  # (top_k,)
-                    
-                    for pos in range(num_experts_per_tok):
-                        expert_id = token_topk_indices[pos].item()
-                        
-                        # print(f"Layer {layer_id}, Token ({b},{s}), Expert {expert_id}, Experts to quantize: {experts_to_quantize}")
-                        if expert_id not in experts_to_quantize:
-                            print(f"Skipping expert {layer_id}-{expert_id}: Not in quantization list.")
-                            continue
-                        
-                        expert_weight = token_topk_weights[pos]
-                        token_hidden = hidden_states[b:b+1, s:s+1, :]  # (1, 1, hidden_dim)
-                        
-                        original_expert = module.experts[expert_id]
-                        original_out = original_expert(token_hidden)
-                        
-                        quant_out = self._forward_quantized_expert(
-                            layer_id, expert_id, precision, token_hidden
-                        )
-                        
-                        modified_output[b, s, :] = (
-                            modified_output[b, s, :]
-                            - expert_weight * original_out[0, 0, :]
-                            + expert_weight * quant_out[0, 0, :]
-                        )
-            
+
+                # Get token indices and their corresponding weights
+                token_indices, topk_positions = torch.where(mask)
+                weights_for_expert = flat_topk_weights[token_indices, topk_positions]  # (num_matches,)
+
+                # Get unique token indices for batched forward pass
+                unique_token_indices, inverse_indices = torch.unique(token_indices, return_inverse=True)
+                expert_hidden = flat_hidden[unique_token_indices]  # (num_unique_tokens, hidden_dim)
+
+                # Batched forward through original expert
+                original_expert = module.experts[expert_id]
+                original_out = original_expert(expert_hidden)  # (num_unique_tokens, hidden_dim)
+
+                # Batched forward through quantized expert
+                quant_out = self._forward_quantized_expert(
+                    layer_id, expert_id, precision, expert_hidden
+                )  # (num_unique_tokens, hidden_dim)
+
+                # Compute delta per unique token
+                token_delta = quant_out - original_out  # (num_unique_tokens, hidden_dim)
+
+                # Map back: each match contributes weight * delta to its token
+                # inverse_indices maps each match back to its unique token index
+                weighted_deltas = weights_for_expert.unsqueeze(1) * token_delta[inverse_indices]  # (num_matches, hidden_dim)
+
+                # Scatter-add weighted deltas back to original token positions
+                delta.index_add_(0, token_indices, weighted_deltas)
+
+            # Apply accumulated delta to output
+            flat_output = hidden_output.view(-1, hidden_dim)
+            modified_flat = flat_output + delta
+            modified_output = modified_flat.view(batch_size, seq_len, hidden_dim)
+
             # Return in same format
             if rest is not None:
                 return (modified_output,) + rest
@@ -284,7 +303,7 @@ class MultiPrecisionMoEModel:
         
         handle = moe_layer.register_forward_hook(moe_hook)
         self._hook_handles.append(handle)
-        print(f"Registered layer override hook for layer {layer_id} with precision {precision.value}.")
+        logger.debug("Registered layer override hook for layer %d with precision %s.", layer_id, precision.value)
         
         return handle
 
@@ -302,7 +321,7 @@ class MultiPrecisionMoEModel:
 
         handle = expert_module.register_forward_hook(expert_hook)
         self._hook_handles.append(handle)
-        print(f"Registered quantized expert hook for layer {layer_id}, expert {expert_id}.")
+        logger.debug("Registered quantized expert hook for layer %d, expert %d.", layer_id, expert_id)
         
         return handle
 
@@ -311,9 +330,9 @@ class MultiPrecisionMoEModel:
             for handle in self._hook_handles:
                 handle.remove()
             self._hook_handles = []
-            print("Cleared all registered hooks.")
+            logger.debug("Cleared all registered hooks.")
         else:
-            print("Default fallback to clear hooks from modules...")
+            logger.debug("Default fallback to clear hooks from modules...")
             for _, module in self.model.named_modules():
                 if hasattr(module, "_forward_hooks"):
                     module._forward_hooks.clear()
@@ -321,7 +340,7 @@ class MultiPrecisionMoEModel:
                     module._backward_hooks.clear()
                 if hasattr(module, "_forward_pre_hooks"):
                     module._forward_pre_hooks.clear()
-            print("Done.")
+            logger.debug("Hooks cleared.")
 
     def quantize_all_experts(
             self, precision: Precision=Precision.MXFP8,
@@ -333,16 +352,18 @@ class MultiPrecisionMoEModel:
             expert_ids = expert_ids if expert_ids is not None else range(num_experts)
             for expert_id in expert_ids:
                 self.register_expert_override_hook(layer_id, expert_id, precision)
-        print("Registered all expert override hooks.")
+        logger.debug("Registered all expert override hooks.")
 
     def quantize_all_layers(
             self, precision: Precision=Precision.MXFP8, quantize_ratio: float=0.5,
-            layer_ids=None, expert_ids=None
+            criteria=QuantizationCriteria.RANDOM, layer_ids=None, expert_ids=None
         ):
         layer_ids = layer_ids if layer_ids is not None else range(len(self.model.model.layers))
         for layer_id in layer_ids:
-            self.register_layer_override_hooks(layer_id, precision, quantize_ratio)
-        print("Registered all layer override hooks.")
+            self.register_layer_override_hooks(
+                layer_id, precision=precision, 
+                quantize_ratio=quantize_ratio, criteria=criteria)
+        logger.debug("Registered all layer override hooks.")
 
     def generate(self, prompts, max_new_tokens=20):
         inputs = self.tokenizer(
@@ -356,7 +377,7 @@ if __name__ == "__main__":
     model = MultiPrecisionMoEModel(
         model_name="Qwen/Qwen3-30B-A3B",
         quantization_dtypes=[
-            # Precision.MXFP8, 
+            Precision.MXFP8, 
             Precision.MXFP4
         ],
         decoding_only=True,
@@ -365,12 +386,18 @@ if __name__ == "__main__":
     )
 
     r = []
-    model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
-    r += model.generate([
-            "The quick brown fox", 
-            "Once upon a time in a land far away"
-        ], max_new_tokens=20)
-    model.clear_hooks()
+    # model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=20)
+    # model.clear_hooks()
+    # model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=20)
+    # model.clear_hooks()
     r += model.generate([
             "The quick brown fox", 
             "Once upon a time in a land far away"

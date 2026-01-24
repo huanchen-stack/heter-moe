@@ -1,0 +1,106 @@
+[
+  {
+    "config": "baseline",
+    "precision": "fp16/bf16",
+    "quantize_ratio": 0.0,
+    "perplexity": 6.03125,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:11:29.881522"
+  },
+  {
+    "config": "mxfp8_50pct_random",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.125,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:11:49.234590"
+  },
+  {
+    "config": "mxfp8_50pct_coldest",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.125,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:11:59.073576"
+  },
+  {
+    "config": "mxfp8_50pct_hottest",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.0625,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:12:24.593112"
+  },
+  {
+    "config": "mxfp8_50pct_lowest",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.0625,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:12:34.482792"
+  },
+  {
+    "config": "mxfp8_50pct_highest",
+    "precision": "mxfp8",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.1875,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:12:59.131832"
+  },
+  {
+    "config": "mxfp8_100pct",
+    "precision": "mxfp8",
+    "quantize_ratio": 1.0,
+    "perplexity": 6.125,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:13:29.197582"
+  },
+  {
+    "config": "mxfp4_50pct_random",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.40625,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:13:46.713902"
+  },
+  {
+    "config": "mxfp4_50pct_coldest",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.40625,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:13:56.455946"
+  },
+  {
+    "config": "mxfp4_50pct_hottest",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.71875,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:14:21.576851"
+  },
+  {
+    "config": "mxfp4_50pct_lowest",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.21875,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:14:31.415301"
+  },
+  {
+    "config": "mxfp4_50pct_highest",
+    "precision": "mxfp4",
+    "quantize_ratio": 0.5,
+    "perplexity": 6.84375,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:14:56.813268"
+  },
+  {
+    "config": "mxfp4_100pct",
+    "precision": "mxfp4",
+    "quantize_ratio": 1.0,
+    "perplexity": 7.21875,
+    "num_tokens": 999,
+    "timestamp": "2026-01-24T01:15:28.052905"
+  }
+]
