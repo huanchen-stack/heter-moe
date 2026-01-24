@@ -82,6 +82,7 @@ class MultiPrecisionMoEModel:
             cache_dir="/models/",
             quantization_dtypes=[Precision.MXFP8],
             quantized_cache_dir="/models/quantized_experts/",
+            decoding_only=True,
             offload=True,
             force_quantization=True,
             autostore_quantized_experts=False
@@ -92,6 +93,8 @@ class MultiPrecisionMoEModel:
 
         quantized_cache_dir = Path(quantized_cache_dir) / model_name.replace("/", "_")
         quantized_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.decoding_only = decoding_only
         self.offload = offload
 
         print("Downloading tokenizer...")
@@ -146,7 +149,7 @@ class MultiPrecisionMoEModel:
                 quant_linear = create_fake_quantized_module(
                     module, precision=precision
                 )
-                quant_linear.to(device="cpu" if self.offload else "cuda")
+                quant_linear.to(device="cpu" if self.offload else "cuda", non_blocking=True)
 
                 self.quantized_experts[precision.value][(layer_id, expert_id)][proj_type] = quant_linear
         print("Quantization of experts complete.")
@@ -189,6 +192,12 @@ class MultiPrecisionMoEModel:
         activated = act_fn(gate_out) * up_out
         
         output = down_proj(activated)
+
+        if self.offload:
+            gate_proj.to(device="cpu", non_blocking=True)
+            up_proj.to(device="cpu", non_blocking=True)
+            down_proj.to(device="cpu", non_blocking=True)
+
         return output
 
     def register_layer_override_hooks(
@@ -237,6 +246,8 @@ class MultiPrecisionMoEModel:
             modified_output = hidden_output.clone()
             
             for b in range(batch_size):
+                if self.decoding_only and seq_len == 0:
+                    continue
                 for s in range(seq_len):   # USING DOUBLE FOR LOOP FOR FUTURE SELECTION WITHIN SEQ
                     token_topk_indices = topk_indices[b, s, :]  # (top_k,)
                     token_topk_weights = topk_weights[b, s, :]  # (top_k,)
@@ -348,35 +359,22 @@ if __name__ == "__main__":
             # Precision.MXFP8, 
             Precision.MXFP4
         ],
+        decoding_only=True,
         force_quantization=False,
         autostore_quantized_experts=True
     )
 
     r = []
-    # r += model.generate([
-    #         "The quick brown fox", 
-    #         "Once upon a time in a land far away"
-    #     ], max_new_tokens=50)
-    # model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
-    # r += model.generate([
-    #         "The quick brown fox", 
-    #         "Once upon a time in a land far away"
-    #     ], max_new_tokens=50)
-    # model.clear_hooks()
-    # r += model.generate([
-    #         "The quick brown fox", 
-    #         "Once upon a time in a land far away"
-    #     ], max_new_tokens=50)
-    model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
+    model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
     r += model.generate([
             "The quick brown fox", 
             "Once upon a time in a land far away"
-        ], max_new_tokens=100)
+        ], max_new_tokens=20)
     model.clear_hooks()
     r += model.generate([
             "The quick brown fox", 
             "Once upon a time in a land far away"
-        ], max_new_tokens=100)
+        ], max_new_tokens=20)
     
     for res in r:
         print("=======")
