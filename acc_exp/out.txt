@@ -7,7 +7,19 @@ Total tokens: 10000
 Perplexity: 7.2812
 
 ==================================================
-Running: mxfp8_50pct_random
+Running: mxfp8_20pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.1562
+
+==================================================
+Running: mxfp8_25pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp8_33pct_coldest
 ==================================================
 Total tokens: 10000
 Perplexity: 7.2812
@@ -19,10 +31,40 @@ Total tokens: 10000
 Perplexity: 7.2812
 
 ==================================================
-Running: mxfp8_50pct_hottest
+Running: mxfp8_66pct_coldest
 ==================================================
 Total tokens: 10000
 Perplexity: 7.3750
+
+==================================================
+Running: mxfp8_75pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
+
+==================================================
+Running: mxfp8_80pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
+
+==================================================
+Running: mxfp8_20pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp8_25pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp8_33pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
 
 ==================================================
 Running: mxfp8_50pct_lowest
@@ -31,10 +73,22 @@ Total tokens: 10000
 Perplexity: 7.2812
 
 ==================================================
-Running: mxfp8_50pct_highest
+Running: mxfp8_66pct_lowest
 ==================================================
 Total tokens: 10000
-Perplexity: 7.5000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp8_75pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
+
+==================================================
+Running: mxfp8_80pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
 
 ==================================================
 Running: mxfp8_100pct
@@ -43,10 +97,22 @@ Total tokens: 10000
 Perplexity: 7.5000
 
 ==================================================
-Running: mxfp4_50pct_random
+Running: mxfp4_20pct_coldest
 ==================================================
 Total tokens: 10000
-Perplexity: 8.0000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp4_25pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
+
+==================================================
+Running: mxfp4_33pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
 
 ==================================================
 Running: mxfp4_50pct_coldest
@@ -55,10 +121,40 @@ Total tokens: 10000
 Perplexity: 7.6250
 
 ==================================================
-Running: mxfp4_50pct_hottest
+Running: mxfp4_66pct_coldest
 ==================================================
 Total tokens: 10000
-Perplexity: 8.6250
+Perplexity: 8.1250
+
+==================================================
+Running: mxfp4_75pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 8.2500
+
+==================================================
+Running: mxfp4_80pct_coldest
+==================================================
+Total tokens: 10000
+Perplexity: 8.3750
+
+==================================================
+Running: mxfp4_20pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp4_25pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.2812
+
+==================================================
+Running: mxfp4_33pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 7.3750
 
 ==================================================
 Running: mxfp4_50pct_lowest
@@ -67,10 +163,22 @@ Total tokens: 10000
 Perplexity: 7.5000
 
 ==================================================
-Running: mxfp4_50pct_highest
+Running: mxfp4_66pct_lowest
 ==================================================
 Total tokens: 10000
-Perplexity: 8.6250
+Perplexity: 7.7500
+
+==================================================
+Running: mxfp4_75pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 8.2500
+
+==================================================
+Running: mxfp4_80pct_lowest
+==================================================
+Total tokens: 10000
+Perplexity: 8.5000
 
 ==================================================
 Running: mxfp4_100pct
@@ -84,17 +192,35 @@ SUMMARY
 Config                 Perplexity Δ from baseline
 --------------------------------------------------
 baseline                   7.2812         +0.0000
-mxfp8_50pct_random         7.2812         +0.0000
+mxfp8_20pct_coldest        7.1562         -0.1250
+mxfp8_25pct_coldest        7.2812         +0.0000
+mxfp8_33pct_coldest        7.2812         +0.0000
 mxfp8_50pct_coldest        7.2812         +0.0000
-mxfp8_50pct_hottest        7.3750         +0.0938
+mxfp8_66pct_coldest        7.3750         +0.0938
+mxfp8_75pct_coldest        7.3750         +0.0938
+mxfp8_80pct_coldest        7.3750         +0.0938
+mxfp8_20pct_lowest         7.2812         +0.0000
+mxfp8_25pct_lowest         7.2812         +0.0000
+mxfp8_33pct_lowest         7.2812         +0.0000
 mxfp8_50pct_lowest         7.2812         +0.0000
-mxfp8_50pct_highest        7.5000         +0.2188
+mxfp8_66pct_lowest         7.2812         +0.0000
+mxfp8_75pct_lowest         7.3750         +0.0938
+mxfp8_80pct_lowest         7.3750         +0.0938
 mxfp8_100pct               7.5000         +0.2188
-mxfp4_50pct_random         8.0000         +0.7188
+mxfp4_20pct_coldest        7.2812         +0.0000
+mxfp4_25pct_coldest        7.3750         +0.0938
+mxfp4_33pct_coldest        7.3750         +0.0938
 mxfp4_50pct_coldest        7.6250         +0.3438
-mxfp4_50pct_hottest        8.6250         +1.3438
+mxfp4_66pct_coldest        8.1250         +0.8438
+mxfp4_75pct_coldest        8.2500         +0.9688
+mxfp4_80pct_coldest        8.3750         +1.0938
+mxfp4_20pct_lowest         7.2812         +0.0000
+mxfp4_25pct_lowest         7.2812         +0.0000
+mxfp4_33pct_lowest         7.3750         +0.0938
 mxfp4_50pct_lowest         7.5000         +0.2188
-mxfp4_50pct_highest        8.6250         +1.3438
+mxfp4_66pct_lowest         7.7500         +0.4688
+mxfp4_75pct_lowest         8.2500         +0.9688
+mxfp4_80pct_lowest         8.5000         +1.2188
 mxfp4_100pct               9.3125         +2.0312
 
-Results saved to: experiment_results/tiny_experiment_20260124_022936.json
+Results saved to: experiment_results/tiny_experiment_20260124_030209.json
