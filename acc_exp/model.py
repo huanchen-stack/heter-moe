@@ -86,8 +86,8 @@ class MultiPrecisionMoEModel:
             quantization_dtypes=[Precision.MXFP8],
             quantized_cache_dir="/models/quantized_experts/",
             decoding_only=True,
-            fake_quantize=True,
-            offload=True,
+            fake_quantize=False,
+            offload=False,
             force_quantization=True,
             autostore_quantized_experts=False
         ):
@@ -382,32 +382,32 @@ class MultiPrecisionMoEModel:
 
 if __name__ == "__main__":
     model = MultiPrecisionMoEModel(
-        # model_name="Qwen/Qwen3-30B-A3B",
+        model_name="Qwen/Qwen3-30B-A3B",
         quantization_dtypes=[
-            Precision.MXFP8, 
-            Precision.MXFP4,
+            # Precision.MXFP8, 
+            # Precision.MXFP4,
             Precision.NVFP4
         ],
         offload=False,
         fake_quantize=False,
         decoding_only=True,
         force_quantization=True,
-        autostore_quantized_experts=True
+        # autostore_quantized_experts=True
     )
 
     r = []
-    model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
-    r += model.generate([
-            "The quick brown fox", 
-            "Once upon a time in a land far away"
-        ], max_new_tokens=20)
-    model.clear_hooks()
-    model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
-    r += model.generate([
-            "The quick brown fox", 
-            "Once upon a time in a land far away"
-        ], max_new_tokens=20)
-    model.clear_hooks()
+    # model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=20)
+    # model.clear_hooks()
+    # model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
+    # r += model.generate([
+    #         "The quick brown fox", 
+    #         "Once upon a time in a land far away"
+    #     ], max_new_tokens=20)
+    # model.clear_hooks()
     model.quantize_all_layers(precision=Precision.NVFP4, quantize_ratio=1.0)
     r += model.generate([
             "The quick brown fox", 

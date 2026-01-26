@@ -79,7 +79,7 @@ def compute_perplexity(
 
 def run_tiny_experiment(
     model_name: str = "allenai/OLMoE-1B-7B-0924",
-    max_tokens: int = 10000,  # ~10K tokens for quick test
+    max_tokens: int = 1000,  # ~1K tokens for quick test
     output_dir: str = "./experiment_results",
 ):
     """
@@ -99,38 +99,54 @@ def run_tiny_experiment(
         # {"name": "mxfp8_100pct",        "precision": Precision.MXFP8, "ratio": 1.0, "criteria": QuantizationCriteria.RANDOM},
         # {"name": "mxfp4_50pct_random",  "precision": Precision.MXFP4, "ratio": 0.5, "criteria": QuantizationCriteria.RANDOM},
         # {"name": "mxfp4_50pct_hottest", "precision": Precision.MXFP4, "ratio": 0.5, "criteria": QuantizationCriteria.HOTTEST_COUNT},
-        {"name": "mxfp8_20pct_coldest", "precision": Precision.MXFP8, "ratio": 0.20, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_25pct_coldest", "precision": Precision.MXFP8, "ratio": 0.25, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_33pct_coldest", "precision": Precision.MXFP8, "ratio": 0.33, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_50pct_coldest", "precision": Precision.MXFP8, "ratio": 0.50, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_66pct_coldest", "precision": Precision.MXFP8, "ratio": 0.66, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        
+        # {"name": "mxfp8_20pct_coldest", "precision": Precision.MXFP8, "ratio": 0.20, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp8_25pct_coldest", "precision": Precision.MXFP8, "ratio": 0.25, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp8_33pct_coldest", "precision": Precision.MXFP8, "ratio": 0.33, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp8_50pct_coldest", "precision": Precision.MXFP8, "ratio": 0.50, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp8_66pct_coldest", "precision": Precision.MXFP8, "ratio": 0.66, "criteria": QuantizationCriteria.COLDEST_COUNT},
         {"name": "mxfp8_75pct_coldest", "precision": Precision.MXFP8, "ratio": 0.75, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_80pct_coldest", "precision": Precision.MXFP8, "ratio": 0.80, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp8_20pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.20, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp8_25pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.25, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp8_33pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.33, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp8_50pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.50, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp8_66pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.66, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_80pct_coldest", "precision": Precision.MXFP8, "ratio": 0.80, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp8_20pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.20, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_25pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.25, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_33pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.33, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_50pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.50, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_66pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.66, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
         {"name": "mxfp8_75pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.75, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp8_80pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.80, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp8_80pct_lowest",  "precision": Precision.MXFP8, "ratio": 0.80, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
         {"name": "mxfp8_100pct",        "precision": Precision.MXFP8, "ratio": 1.00, "criteria": QuantizationCriteria.RANDOM},
         
-        {"name": "mxfp4_20pct_coldest", "precision": Precision.MXFP4, "ratio": 0.20, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_25pct_coldest", "precision": Precision.MXFP4, "ratio": 0.25, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_33pct_coldest", "precision": Precision.MXFP4, "ratio": 0.33, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_50pct_coldest", "precision": Precision.MXFP4, "ratio": 0.50, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_66pct_coldest", "precision": Precision.MXFP4, "ratio": 0.66, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_75pct_coldest", "precision": Precision.MXFP4, "ratio": 0.75, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_80pct_coldest", "precision": Precision.MXFP4, "ratio": 0.80, "criteria": QuantizationCriteria.COLDEST_COUNT},
-        {"name": "mxfp4_20pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.20, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_25pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.25, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_33pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.33, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_50pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.50, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_66pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.66, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_75pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.75, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        {"name": "mxfp4_80pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.80, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
-        # {"name": "mxfp4_50pct_highest", "precision": Precision.MXFP4, "ratio": 0.5, "criteria": QuantizationCriteria.HIGHEST_WEIGHT_SUM},
-        {"name": "mxfp4_100pct",        "precision": Precision.MXFP4, "ratio": 1.00, "criteria": QuantizationCriteria.RANDOM},
+        # # {"name": "mxfp4_20pct_coldest", "precision": Precision.MXFP4, "ratio": 0.20, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_25pct_coldest", "precision": Precision.MXFP4, "ratio": 0.25, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_33pct_coldest", "precision": Precision.MXFP4, "ratio": 0.33, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_50pct_coldest", "precision": Precision.MXFP4, "ratio": 0.50, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_66pct_coldest", "precision": Precision.MXFP4, "ratio": 0.66, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "mxfp4_75pct_coldest", "precision": Precision.MXFP4, "ratio": 0.75, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_80pct_coldest", "precision": Precision.MXFP4, "ratio": 0.80, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "mxfp4_20pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.20, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "mxfp4_25pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.25, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "mxfp4_33pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.33, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "mxfp4_50pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.50, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "mxfp4_66pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.66, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp4_75pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.75, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "mxfp4_80pct_lowest",  "precision": Precision.MXFP4, "ratio": 0.80, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "mxfp4_100pct",        "precision": Precision.MXFP4, "ratio": 1.00, "criteria": QuantizationCriteria.RANDOM},
+        
+        # # {"name": "nvfp4_20pct_coldest", "precision": Precision.NVFP4, "ratio": 0.20, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_25pct_coldest", "precision": Precision.NVFP4, "ratio": 0.25, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_33pct_coldest", "precision": Precision.NVFP4, "ratio": 0.33, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_50pct_coldest", "precision": Precision.NVFP4, "ratio": 0.50, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_66pct_coldest", "precision": Precision.NVFP4, "ratio": 0.66, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # {"name": "nvfp4_75pct_coldest", "precision": Precision.NVFP4, "ratio": 0.75, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_80pct_coldest", "precision": Precision.NVFP4, "ratio": 0.80, "criteria": QuantizationCriteria.COLDEST_COUNT},
+        # # {"name": "nvfp4_20pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.20, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "nvfp4_25pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.25, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "nvfp4_33pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.33, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "nvfp4_50pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.50, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "nvfp4_66pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.66, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "nvfp4_75pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.75, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # # {"name": "nvfp4_80pct_lowest",  "precision": Precision.NVFP4, "ratio": 0.80, "criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+        # {"name": "nvfp4_100pct",        "precision": Precision.NVFP4, "ratio": 1.00, "criteria": QuantizationCriteria.RANDOM},
     ]
     
     results = []
@@ -139,7 +155,11 @@ def run_tiny_experiment(
     print(f"Loading model: {model_name}")
     model = MultiPrecisionMoEModel(
         model_name=model_name,
-        quantization_dtypes=[Precision.MXFP8, Precision.MXFP4],
+        quantization_dtypes=[
+            Precision.MXFP8, 
+            # Precision.MXFP4,
+            # Precision.NVFP4,
+        ],
         decoding_only=False,  # We need to evaluate on full sequences
         force_quantization=True,
         offload=False,
@@ -177,7 +197,7 @@ def run_tiny_experiment(
         }
         results.append(result)
         
-        print(f"Perplexity: {ppl:.4f}")
+        print(f"Perplexity: {ppl:.8f}")
     
     # Save results
     results_file = output_dir / f"tiny_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -194,8 +214,8 @@ def run_tiny_experiment(
     baseline_ppl = results[0]["perplexity"]
     for r in results:
         delta = r["perplexity"] - baseline_ppl
-        delta_str = f"+{delta:.4f}" if delta >= 0 else f"{delta:.4f}"
-        print(f"{r['config']:<20} {r['perplexity']:>12.4f} {delta_str:>15}")
+        delta_str = f"+{delta:.8f}" if delta >= 0 else f"{delta:.8f}"
+        print(f"{r['config']:<20} {r['perplexity']:>12.8f} {delta_str:>15}")
     
     print(f"\nResults saved to: {results_file}")
     
@@ -204,6 +224,6 @@ def run_tiny_experiment(
 
 if __name__ == "__main__":
     results = run_tiny_experiment(
-        model_name="allenai/OLMoE-1B-7B-0924",
+        model_name="Qwen/Qwen3-30B-A3B",
         max_tokens=10000,  # Start small, increase for real experiment
     )
