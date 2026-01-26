@@ -5,7 +5,7 @@ import re
 import logging
 from enum import Enum
 
-from quantization import create_fake_quantized_module, Precision
+from quantization import Precision, quantized_module, dequantize_module
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class MultiPrecisionMoEModel:
             quantization_dtypes=[Precision.MXFP8],
             quantized_cache_dir="/models/quantized_experts/",
             decoding_only=True,
+            fake_quantize=True,
             offload=True,
             force_quantization=True,
             autostore_quantized_experts=False
@@ -98,6 +99,7 @@ class MultiPrecisionMoEModel:
         quantized_cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.decoding_only = decoding_only
+        self.fake_quantize = fake_quantize
         self.offload = offload
 
         logger.info("Downloading tokenizer...")
@@ -149,8 +151,8 @@ class MultiPrecisionMoEModel:
                 if (layer_id, expert_id) not in self.quantized_experts[precision.value]:
                     self.quantized_experts[precision.value][(layer_id, expert_id)] = {}
                 proj_type = str(match.group(3))
-                quant_linear = create_fake_quantized_module(
-                    module, precision=precision
+                quant_linear = quantized_module(
+                    module, precision=precision, fake=self.fake_quantize
                 )
                 quant_linear.to(device="cpu" if self.offload else "cuda", non_blocking=True)
 
@@ -184,9 +186,14 @@ class MultiPrecisionMoEModel:
             quant_expert["up_proj"],
             quant_expert["down_proj"]
         )
-        gate_proj.to(device=hidden_states.device)
-        up_proj.to(device=hidden_states.device)
-        down_proj.to(device=hidden_states.device)
+        if self.offload:
+            gate_proj.to(device=hidden_states.device)
+            up_proj.to(device=hidden_states.device)
+            down_proj.to(device=hidden_states.device)
+        if not self.fake_quantize:
+            gate_proj = dequantize_module(gate_proj)
+            up_proj = dequantize_module(up_proj)
+            down_proj = dequantize_module(down_proj)
 
         gate_out = gate_proj(hidden_states)
         up_out = up_proj(hidden_states)
@@ -375,29 +382,38 @@ class MultiPrecisionMoEModel:
 
 if __name__ == "__main__":
     model = MultiPrecisionMoEModel(
-        model_name="Qwen/Qwen3-30B-A3B",
+        # model_name="Qwen/Qwen3-30B-A3B",
         quantization_dtypes=[
             Precision.MXFP8, 
-            Precision.MXFP4
+            Precision.MXFP4,
+            Precision.NVFP4
         ],
+        offload=False,
+        fake_quantize=False,
         decoding_only=True,
-        force_quantization=False,
+        force_quantization=True,
         autostore_quantized_experts=True
     )
 
     r = []
-    # model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
-    # r += model.generate([
-    #         "The quick brown fox", 
-    #         "Once upon a time in a land far away"
-    #     ], max_new_tokens=20)
-    # model.clear_hooks()
-    # model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
-    # r += model.generate([
-    #         "The quick brown fox", 
-    #         "Once upon a time in a land far away"
-    #     ], max_new_tokens=20)
-    # model.clear_hooks()
+    model.quantize_all_layers(precision=Precision.MXFP8, quantize_ratio=1.0)
+    r += model.generate([
+            "The quick brown fox", 
+            "Once upon a time in a land far away"
+        ], max_new_tokens=20)
+    model.clear_hooks()
+    model.quantize_all_layers(precision=Precision.MXFP4, quantize_ratio=1.0)
+    r += model.generate([
+            "The quick brown fox", 
+            "Once upon a time in a land far away"
+        ], max_new_tokens=20)
+    model.clear_hooks()
+    model.quantize_all_layers(precision=Precision.NVFP4, quantize_ratio=1.0)
+    r += model.generate([
+            "The quick brown fox", 
+            "Once upon a time in a land far away"
+        ], max_new_tokens=20)
+    model.clear_hooks()
     r += model.generate([
             "The quick brown fox", 
             "Once upon a time in a land far away"
