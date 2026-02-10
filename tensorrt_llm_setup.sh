@@ -18,3 +18,19 @@ pip install parameterized pytest
 
 # IMPORTANT!!!! BUT CONFLICT W/ GIT, SO USE SEPARATE SHELL FOR GIT
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# ===================================================================
+# ========================== cuda130 ================================
+# ===================================================================
+# https://nvidia.github.io/TensorRT-LLM/installation/linux.html 
+
+conda create -n tensorrtllm python=3.10 -y
+conda activate tensorrtllm
+
+conda install -c conda-forge mpi4py
+
+pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
+
+CURRENT_TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
+echo "torch==$CURRENT_TORCH_VERSION" > /tmp/torch-constraint.txt
+pip install --upgrade pip setuptools && pip install tensorrt_llm -c /tmp/torch-constraint.txt
