@@ -34,3 +34,9 @@ pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/wh
 CURRENT_TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
 echo "torch==$CURRENT_TORCH_VERSION" > /tmp/torch-constraint.txt
 pip install --upgrade pip setuptools && pip install tensorrt_llm -c /tmp/torch-constraint.txt
+
+
+export PMIX_MCA_psec=native
+export PRTE_MCA_plm_ssh_agent=""
+export PRTE_ALLOW_RUN_AS_ROOT=1
+export PRTE_ALLOW_RUN_AS_ROOT_CONFIRM=1
