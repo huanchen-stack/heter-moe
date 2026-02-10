@@ -1,0 +1,12 @@
+============================================================
+THROUGHPUT BENCHMARK RESULTS
+============================================================
+Elapsed Time:              26.49 sec
+Number of Requests:        500
+Avg Input Length:          90.3 tokens
+Avg Output Length:         251.5 tokens
+------------------------------------------------------------
+Request Throughput:        18.88 req/s
+Output Token Throughput:   4746.83 tokens/s
+Total Token Throughput:    6451.32 tokens/s
+============================================================
