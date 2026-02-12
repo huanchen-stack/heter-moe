@@ -44,6 +44,8 @@ python3 ./scripts/build_wheel.py --extra-cmake-vars ENABLE_MULTI_DEVICE=0 --extr
 pip install -e .
 # clean build: python3 ./scripts/build_wheel.py --clean
 
+pip install -r requirements.txt
+python -c "import tensorrt_llm"
 
 
 # ===================================================
