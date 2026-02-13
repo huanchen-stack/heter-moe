@@ -60,11 +60,11 @@ python -c "import tensorrt_llm"
 pip install cmake
 pip install -r requirements.txt
 
-apt install libnuma-dev libnccl2 libnccl-dev openmpi-bin libopenmpi-dev libnvinfer-dev libnvonnxparsers-dev -y
+apt install libnuma-dev libnccl2 libnccl-dev openmpi-bin libopenmpi-dev libnvinfer-dev libnvonnxparsers-dev libucx-dev ninja-build -y
 
 rm -rf cpp/build
 make -C docker ngc-devel_run LOCAL_USER=1 DOCKER_PULL=1 IMAGE_TAG=1.3.0rc2
-python scripts/build_wheel.py --help 2>&1 | grep -iE "nixl|ucx"
+# python scripts/build_wheel.py --help 2>&1 | grep -iE "nixl|ucx"
 ./scripts/build_wheel.py --clean --use_ccache --cuda_architectures=native
 
 python -c "import tensorrt_llm"
