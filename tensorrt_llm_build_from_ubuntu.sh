@@ -1,10 +1,9 @@
 # vm's default python3 version is 3.10
 
 
-# -------------------
-# install nv toolkit 
-# -------------------
-
+##########################
+# INSTALL NV TOOLKIT
+##########################
 
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin
 sudo mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
@@ -17,6 +16,8 @@ sudo apt-get -y install cuda-toolkit-13-0
 export PATH=/usr/local/cuda-13.0/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:$LD_LIBRARY_PATH
 nvcc --version
+
+# ---------------------------------
 
 # trt build: https://nvidia.github.io/TensorRT-LLM/latest/installation/build-from-source-linux.html# 
 
@@ -51,17 +52,21 @@ python -c "import tensorrt_llm"
 # ===================================================
 #  official docker image (PREFERED)
 # ---------------------------------------------------
-
-# ALSO NEED TO INSTALL CUDA TOOLKIT FIRST!!!
-
-# https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/devel?version=1.2.0rc6.post3
-# With the top-level directory of the TensorRT LLM repository cloned to your local machine, you can run the following command to start the development container:
+#    ALSO NEED TO INSTALL CUDA TOOLKIT FIRST!!!
+#    https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/devel?version=1.2.0rc6.post3
+#    With the top-level directory of the TensorRT LLM repository cloned to your local machine, you can run the following command to start the development container:
 
 ################# PREFERED!!! ####################
-make -C docker ngc-devel_run LOCAL_USER=1 DOCKER_PULL=1 IMAGE_TAG=1.3.0rc2
-apt install openmpi-bin libopenmpi-dev   #?
-./scripts/build_wheel.py --clean --use_ccache --cuda_architectures=native
+pip install cmake
 pip install -r requirements.txt
+
+apt install libnuma-dev libnccl2 libnccl-dev openmpi-bin libopenmpi-dev libnvinfer-dev libnvonnxparsers-dev -y
+
+rm -rf cpp/build
+make -C docker ngc-devel_run LOCAL_USER=1 DOCKER_PULL=1 IMAGE_TAG=1.3.0rc2
+python scripts/build_wheel.py --help 2>&1 | grep -iE "nixl|ucx"
+./scripts/build_wheel.py --clean --use_ccache --cuda_architectures=native
+
 python -c "import tensorrt_llm"
 ################# PREFERED!!! ####################
 
