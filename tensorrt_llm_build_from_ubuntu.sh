@@ -65,7 +65,7 @@ apt-get install libnuma-dev libnccl2 libnccl-dev openmpi-bin libopenmpi-dev libn
 
 rm -rf cpp/build
 make -C docker ngc-devel_run LOCAL_USER=1 DOCKER_PULL=1 IMAGE_TAG=1.3.0rc2
-./scripts/build_wheel.py --clean --use_ccache --cuda_architectures=native
+./scripts/build_wheel.py --clean --use_ccache --cuda_architectures=native --job_count=16
 
 python -c "import tensorrt_llm"
 ################# PREFERED!!! ####################
