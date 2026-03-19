@@ -119,28 +119,46 @@ def make_nvfp4_forward(
 
 
 # ============================================================================
-# FP8 (W8A8) Fake Quantization
+# FP8 (W8A8) — Real FP8 Tensor Core GEMM via FlashInfer
 # ============================================================================
 
-def fake_quantize_fp8_e4m3(tensor: Tensor) -> Tensor:
-    """Fake-quantize to FP8 E4M3: scale → cast → cast back → unscale."""
-    amax = tensor.float().abs().nan_to_num().max().clamp(min=1e-12)
-    scale = torch.finfo(torch.float8_e4m3fn).max / amax   # 448 / amax
-    scaled = (tensor.float() * scale).clamp(-448.0, 448.0)
-    return scaled.to(torch.float8_e4m3fn).to(tensor.dtype) / scale
-
-
 def make_fp8_forward(linear: nn.Linear) -> tuple:
-    """Create a W8A8 FP8 replacement for nn.Linear.forward().
+    """Create a W8A8 FP8 replacement using FlashInfer gemm_fp8_nt_groupwise.
 
-    Both weight and activation are fake-quantized to FP8 E4M3 on every call.
-    No pre-computed tensors stored.
+    Activation: per-token groupwise FP8 (flashinfer.testing.utils.per_token_cast_to_fp8).
+    Weight: per-block FP8 128×128 (flashinfer.testing.utils.per_block_cast_to_fp8).
+    GEMM: real FP8 tensor core compute via flashinfer.gemm.gemm_fp8_nt_groupwise.
+    All quantized tensors computed on-the-fly and discarded.
     """
+    from flashinfer.gemm import gemm_fp8_nt_groupwise
+    from flashinfer.testing.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+
     def fp8_forward(input: Tensor) -> Tensor:
-        w_fq = fake_quantize_fp8_e4m3(linear.weight.data)
-        x_fq = fake_quantize_fp8_e4m3(input)
-        out = torch.nn.functional.linear(x_fq, w_fq, linear.bias)
-        return out
+        w = linear.weight.data     # [N, K]
+        bias = linear.bias
+        orig_shape = input.shape
+        x = input.reshape(-1, orig_shape[-1])  # [M, K]
+        M, K = x.shape
+        N = w.shape[0]
+
+        # ── Quantize activation: per-token, 128-element groups along K ──
+        x_fp8, x_sf = per_token_cast_to_fp8(x)    # x_fp8: [M,K], x_sf: [M, K//128]
+        a_scale = x_sf.T.contiguous()              # [K//128, M] for "MN" mode
+
+        # ── Quantize weight: 128×128 block-wise ─────────────────────────
+        w_fp8, w_sf = per_block_cast_to_fp8(w)     # w_fp8: [N,K], w_sf: [N//128, K//128]
+        b_scale = w_sf.T.contiguous()              # [K//128, N//128] for "MN" mode
+
+        # ── Real FP8 tensor core GEMM ───────────────────────────────────
+        out = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
+        gemm_fp8_nt_groupwise(
+            x_fp8, w_fp8, a_scale, b_scale,
+            out=out, scale_major_mode="MN",
+        )
+
+        if bias is not None:
+            out = out + bias
+        return out.reshape(*orig_shape[:-1], out.shape[-1])
 
     return fp8_forward, None
 
