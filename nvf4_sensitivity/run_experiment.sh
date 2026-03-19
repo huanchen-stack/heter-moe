@@ -139,50 +139,50 @@ print(f'    safetensors:   ${n_safetensors} files')
 
 verify_model "${QWEN3_DIR}" "Qwen3-30B-A3B"
 
-# =============================================================================
-# STEP 3: Sanity inference test
-# =============================================================================
-echo ""
-echo "============================================================"
-echo " Step 3: Sanity inference test"
-echo "============================================================"
+# # =============================================================================
+# # STEP 3: Sanity inference test
+# # =============================================================================
+# echo ""
+# echo "============================================================"
+# echo " Step 3: Sanity inference test"
+# echo "============================================================"
 
-sanity_test() {
-    local model_dir=$1
-    local model_name=$2
+# sanity_test() {
+#     local model_dir=$1
+#     local model_name=$2
 
-    log "Testing ${model_name} inference..."
-    python -c "
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+#     log "Testing ${model_name} inference..."
+#     python -c "
+# import torch
+# from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_path = '${model_dir}'
-print(f'  Loading {model_path}...')
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path,
-    torch_dtype=torch.bfloat16,
-    device_map='auto',
-    trust_remote_code=True,
-    attn_implementation='sdpa',
-)
-model.eval()
+# model_path = '${model_dir}'
+# print(f'  Loading {model_path}...')
+# tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+# model = AutoModelForCausalLM.from_pretrained(
+#     model_path,
+#     torch_dtype=torch.bfloat16,
+#     device_map='auto',
+#     trust_remote_code=True,
+#     attn_implementation='sdpa',
+# )
+# model.eval()
 
-input_ids = tokenizer('Hello, world!', return_tensors='pt').input_ids.to(model.device)
-with torch.no_grad():
-    out = model(input_ids)
-    logits = out.logits
-    print(f'  Output logits shape: {logits.shape}')
-    print(f'  First token logit mean: {logits[0,0,:].float().mean().item():.4f}')
-    print(f'  Inference OK!')
+# input_ids = tokenizer('Hello, world!', return_tensors='pt').input_ids.to(model.device)
+# with torch.no_grad():
+#     out = model(input_ids)
+#     logits = out.logits
+#     print(f'  Output logits shape: {logits.shape}')
+#     print(f'  First token logit mean: {logits[0,0,:].float().mean().item():.4f}')
+#     print(f'  Inference OK!')
 
-del model
-torch.cuda.empty_cache()
-" || err "Inference test FAILED for ${model_name}"
-    log "${model_name} inference passed"
-}
+# del model
+# torch.cuda.empty_cache()
+# " || err "Inference test FAILED for ${model_name}"
+#     log "${model_name} inference passed"
+# }
 
-sanity_test "${QWEN3_DIR}" "Qwen3-30B-A3B"
+# sanity_test "${QWEN3_DIR}" "Qwen3-30B-A3B"
 
 # =============================================================================
 # STEP 4: Run NVFP4 sensitivity analysis

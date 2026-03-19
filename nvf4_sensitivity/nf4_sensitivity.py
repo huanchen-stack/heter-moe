@@ -33,7 +33,6 @@ import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 from torch import Tensor
-from flashinfer import nvfp4_quantize, mm_fp4, SfLayout
 
 
 # ============================================================================
@@ -58,74 +57,157 @@ def compute_nvfp4_global_scale(tensor: Tensor) -> Tensor:
     return (448.0 * 6.0) / absmax.clamp(min=1e-12)
 
 
-@torch.no_grad()
 def make_nvfp4_forward(
     linear: nn.Linear,
     backend: str = "cudnn",
 ) -> tuple:
+    """Create an NVFP4 (W4A4) replacement for nn.Linear.forward().
+
+    Weight and activation are quantized to NVFP4 on every call and
+    immediately discarded — no pre-computed tensors stored in the closure.
+
+    Requires: flashinfer-python >= 0.6.5, Blackwell GPU (SM120/SM100).
     """
-    Create an NVFP4 replacement for nn.Linear.forward().
-
-    Pre-quantizes the weight to NVFP4. Returns (nvfp4_forward_fn, cleanup_data).
-    The forward_fn quantizes activations on-the-fly and uses mm_fp4 for
-    native FP4×FP4 → BF16 tensor core GEMM.
-
-    Args:
-        linear: the nn.Linear module to replace
-        backend: FlashInfer mm_fp4 backend ('cudnn', 'cutlass', 'auto')
-
-    Returns:
-        (nvfp4_forward_fn, w_global_sf)
-    """
-    w = linear.weight.data  # [out_features, in_features]
-    bias = linear.bias
-
-    # Pre-quantize weight to NVFP4
-    w_global_sf = compute_nvfp4_global_scale(w)
-    w_fp4, w_sf = nvfp4_quantize(
-        w, w_global_sf,
-        sfLayout=SfLayout.layout_128x4,
-        do_shuffle=False,
-    )
-    # mm_fp4 expects B in column-major: pass w_fp4.T
-    w_fp4_t = w_fp4.T.contiguous()
-    w_sf_t = w_sf.T.contiguous()
+    from flashinfer import nvfp4_quantize, mm_fp4, SfLayout
+    effective_backend = [backend]
 
     def nvfp4_forward(input: Tensor) -> Tensor:
+        w = linear.weight.data
+        bias = linear.bias
         orig_shape = input.shape
-        x = input.reshape(-1, orig_shape[-1])  # [M, K]
+        x = input.reshape(-1, orig_shape[-1])
 
-        # Quantize activation to NVFP4 on-the-fly
+        # Quantize weight
+        w_global_sf = compute_nvfp4_global_scale(w)
+        w_fp4, w_sf = nvfp4_quantize(
+            w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
+        )
+        w_fp4_t = w_fp4.T.contiguous()
+        w_sf_t = w_sf.T.contiguous()
+
+        # Quantize activation
         x_global_sf = compute_nvfp4_global_scale(x)
         x_fp4, x_sf = nvfp4_quantize(
-            x, x_global_sf,
-            sfLayout=SfLayout.layout_128x4,
-            do_shuffle=False,
+            x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
 
-        # Combined dequantization scale
         alpha = torch.tensor(
             1.0 / (x_global_sf.item() * w_global_sf.item()),
             device=x.device, dtype=torch.float32,
         )
 
-        # Native FP4 × FP4 → BF16 tensor core GEMM
-        out = mm_fp4(
-            x_fp4, w_fp4_t,
-            x_sf, w_sf_t,
-            alpha,
-            out_dtype=torch.bfloat16,
-            block_size=NVFP4_BLOCK_SIZE,
-            backend=backend,
-            use_nvfp4=True,
-        )
+        try:
+            out = mm_fp4(
+                x_fp4, w_fp4_t, x_sf, w_sf_t, alpha,
+                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
+                backend=effective_backend[0], use_nvfp4=True,
+            )
+        except RuntimeError:
+            if effective_backend[0] != "cutlass":
+                effective_backend[0] = "cutlass"
+            out = mm_fp4(
+                x_fp4, w_fp4_t, x_sf, w_sf_t, alpha,
+                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
+                backend="cutlass", use_nvfp4=True,
+            )
 
         if bias is not None:
             out = out + bias
-
         return out.reshape(*orig_shape[:-1], out.shape[-1])
 
-    return nvfp4_forward, w_global_sf
+    return nvfp4_forward, None
+
+
+# ============================================================================
+# FP8 (W8A8) Fake Quantization
+# ============================================================================
+
+def fake_quantize_fp8_e4m3(tensor: Tensor) -> Tensor:
+    """Fake-quantize to FP8 E4M3: scale → cast → cast back → unscale."""
+    amax = tensor.float().abs().nan_to_num().max().clamp(min=1e-12)
+    scale = torch.finfo(torch.float8_e4m3fn).max / amax   # 448 / amax
+    scaled = (tensor.float() * scale).clamp(-448.0, 448.0)
+    return scaled.to(torch.float8_e4m3fn).to(tensor.dtype) / scale
+
+
+def make_fp8_forward(linear: nn.Linear) -> tuple:
+    """Create a W8A8 FP8 replacement for nn.Linear.forward().
+
+    Both weight and activation are fake-quantized to FP8 E4M3 on every call.
+    No pre-computed tensors stored.
+    """
+    def fp8_forward(input: Tensor) -> Tensor:
+        w_fq = fake_quantize_fp8_e4m3(linear.weight.data)
+        x_fq = fake_quantize_fp8_e4m3(input)
+        out = torch.nn.functional.linear(x_fq, w_fq, linear.bias)
+        return out
+
+    return fp8_forward, None
+
+
+# ============================================================================
+# A16W4 (Weight-only FP4) Fake Quantization
+# ============================================================================
+
+# FP4 E2M1 representable magnitudes and their midpoint breakpoints
+_FP4_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+_FP4_BREAKS = [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0]
+
+
+def fake_quantize_fp4_e2m1(tensor: Tensor, block_size: int = 16) -> Tensor:
+    """Fake-quantize to FP4 E2M1 with per-block scaling (matches NVFP4 scheme)."""
+    orig_shape = tensor.shape
+    flat = tensor.reshape(-1, block_size)
+
+    # Per-block scale: max(|block|) / max_fp4 (6.0)
+    amax = flat.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-12)
+    scale = amax / 6.0
+
+    # Scale into FP4 range, split sign
+    scaled = flat / scale
+    sign = scaled.sign()
+    abs_scaled = scaled.abs()
+
+    # Bucket into nearest FP4 value
+    breaks = torch.tensor(_FP4_BREAKS, device=tensor.device, dtype=tensor.dtype)
+    vals = torch.tensor(_FP4_VALUES, device=tensor.device, dtype=tensor.dtype)
+    idx = torch.bucketize(abs_scaled, breaks)
+    quantized_abs = vals[idx]
+
+    return (sign * quantized_abs * scale).reshape(orig_shape)
+
+
+def make_a16w4_forward(linear: nn.Linear) -> tuple:
+    """Create a W4A16 replacement for nn.Linear.forward().
+
+    Weight is fake-quantized to FP4 E2M1 on every call.
+    Activation stays in BF16. No pre-computed tensors stored.
+    """
+    def a16w4_forward(input: Tensor) -> Tensor:
+        w_fq = fake_quantize_fp4_e2m1(linear.weight.data)
+        out = torch.nn.functional.linear(input, w_fq, linear.bias)
+        return out
+
+    return a16w4_forward, None
+
+
+# ============================================================================
+# Dispatch
+# ============================================================================
+
+def make_quant_forward(linear: nn.Linear, quant_mode: str, backend: str = "cudnn") -> tuple:
+    """Create a quantized forward function for the given mode.
+
+    Returns (forward_fn, extra_data).
+    """
+    if quant_mode == "nvfp4":
+        return make_nvfp4_forward(linear, backend=backend)
+    elif quant_mode == "fp8":
+        return make_fp8_forward(linear)
+    elif quant_mode == "a16w4":
+        return make_a16w4_forward(linear)
+    else:
+        raise ValueError(f"Unknown quant_mode: {quant_mode}")
 
 
 # ============================================================================
@@ -174,32 +256,112 @@ MODEL_EXPERT_CONFIG = {
 }
 
 
-def get_experts(layer: nn.Module, model_type: str, num_experts: int) -> list[nn.Module]:
-    """Get all expert modules from a layer (routed + shared).
+class ExpertMLP(nn.Module):
+    """Individual expert module created from slices of fused 3D weight tensors."""
 
-    Uses indexing (experts[i]) instead of iteration to handle both
-    nn.ModuleList and ExpertsInterface (e.g. Qwen3MoeExperts).
+    def __init__(self, gate_weight: Tensor, up_weight: Tensor,
+                 down_weight: Tensor, act_fn: nn.Module):
+        super().__init__()
+        inter_dim, hidden_dim = gate_weight.shape
+        self.gate_proj = nn.Linear(hidden_dim, inter_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, inter_dim, bias=False)
+        self.down_proj = nn.Linear(inter_dim, hidden_dim, bias=False)
+        # Point to slices of the fused tensor (views — no extra memory)
+        self.gate_proj.weight = nn.Parameter(gate_weight, requires_grad=False)
+        self.up_proj.weight = nn.Parameter(up_weight, requires_grad=False)
+        self.down_proj.weight = nn.Parameter(down_weight, requires_grad=False)
+        self.act_fn = act_fn
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+
+def unfuse_moe_experts(moe_block: nn.Module) -> None:
+    """Replace fused Qwen3MoeExperts (3D weight tensors) with individual ExpertMLP modules.
+
+    After this, moe_block.experts is nn.ModuleList[ExpertMLP] and the forward
+    routes through individual expert modules, so monkey-patching nn.Linear.forward
+    on a single expert's projection actually affects the layer computation.
+
+    Uses views of the original fused tensors — no extra GPU memory.
     """
+    fused = moe_block.experts
+
+    # Already unfused (nn.ModuleList) — nothing to do
+    if isinstance(fused, nn.ModuleList):
+        return
+
+    # Not a fused format we recognise
+    if not hasattr(fused, "gate_up_proj"):
+        return
+
+    num_experts = fused.num_experts
+    inter_dim = fused.intermediate_dim
+    act_fn = fused.act_fn
+    gate = moe_block.gate
+
+    # Build individual expert modules from slices of fused 3D params
+    experts_list = nn.ModuleList()
+    for i in range(num_experts):
+        gate_up = fused.gate_up_proj[i]            # [2*inter, hidden] (view)
+        expert = ExpertMLP(
+            gate_weight=gate_up[:inter_dim],        # [inter, hidden]   (view)
+            up_weight=gate_up[inter_dim:],           # [inter, hidden]   (view)
+            down_weight=fused.down_proj[i],          # [hidden, inter]   (view)
+            act_fn=act_fn,
+        )
+        experts_list.append(expert)
+
+    # Move to same device as original weights
+    dev = fused.gate_up_proj.device
+    experts_list = experts_list.to(dev)
+
+    # Replace the fused experts with our ModuleList
+    moe_block.experts = experts_list
+
+    # Replace forward to route through individual expert modules
+    def unfused_forward(hidden_states: Tensor) -> Tensor:
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        flat = hidden_states.view(-1, hidden_dim)
+        _, routing_weights, selected_experts = gate(flat)
+
+        final = torch.zeros_like(flat)
+        expert_mask = torch.nn.functional.one_hot(
+            selected_experts, num_classes=num_experts,
+        ).permute(2, 1, 0)
+
+        with torch.no_grad():
+            expert_hit = expert_mask.sum(dim=(-1, -2)).nonzero().squeeze(-1)
+
+        for idx in expert_hit:
+            top_k_pos, token_idx = torch.where(expert_mask[idx])
+            if token_idx.numel() == 0:
+                continue
+            out = experts_list[idx](flat[token_idx])
+            out = out * routing_weights[token_idx, top_k_pos, None]
+            final.index_add_(0, token_idx, out.to(final.dtype))
+
+        return final.reshape(batch_size, seq_len, hidden_dim)
+
+    moe_block.forward = unfused_forward
+
+
+def get_experts(layer: nn.Module, model_type: str) -> list[nn.Module]:
+    """Get all expert modules from a layer (routed + shared)."""
     experts = []
     if model_type in ("qwen2_moe", "qwen3_moe"):
-        mlp_experts = layer.mlp.experts
-        n = getattr(mlp_experts, "num_experts", num_experts)
-        experts.extend([mlp_experts[i] for i in range(n)])
+        experts.extend(layer.mlp.experts)
         if hasattr(layer.mlp, "shared_expert") and layer.mlp.shared_expert is not None:
             experts.append(layer.mlp.shared_expert)
     elif model_type == "deepseek_v2":
         if hasattr(layer.mlp, "experts"):
-            mlp_experts = layer.mlp.experts
-            n = getattr(mlp_experts, "num_experts", num_experts)
-            experts.extend([mlp_experts[i] for i in range(n)])
+            experts.extend(layer.mlp.experts)
             if hasattr(layer.mlp, "shared_experts"):
                 experts.append(layer.mlp.shared_experts)
         else:
             experts.append(layer.mlp)
     elif model_type == "mixtral":
-        mlp_experts = layer.block_sparse_moe.experts
-        n = getattr(mlp_experts, "num_experts", num_experts)
-        experts.extend([mlp_experts[i] for i in range(n)])
+        experts.extend(layer.block_sparse_moe.experts)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
     return experts
@@ -216,7 +378,10 @@ def get_model_quant_error(
     metric: str,  # "layer_out_norm" or "model_out_norm"
     save_path: str,
     max_layers: int = -1,
+    max_experts: int = -1,
     backend: str = "cudnn",
+    quant_mode: str = "nvfp4",
+    joint: bool = False,
 ):
     """
     NVFP4 quantization sensitivity analysis.
@@ -260,10 +425,21 @@ def get_model_quant_error(
     num_samples = len(dataloader)
     layers = model.model.layers
 
-    print(f"NVFP4 Sensitivity Analysis (metric={metric})")
+    print(f"Quantization Sensitivity Analysis (metric={metric}, quant={quant_mode})")
     print(f"  Model: {model_path} ({model_type})")
     print(f"  Layers: {num_layers}, Hidden: {hidden_size}, Experts: {num_experts}")
     print(f"  Backend: {backend}, Samples: {num_samples}")
+    print(f"  Quant mode: {quant_mode}")
+
+    # ── Unfuse MoE experts (3D fused tensors → individual nn.Module) ──
+    # Newer transformers stores expert weights as fused 3D nn.Parameter
+    # (Qwen3MoeExperts). We need individual ExpertMLP modules so that
+    # monkey-patching a single nn.Linear.forward actually affects the
+    # layer computation during sensitivity measurement.
+    for layer in layers:
+        if hasattr(layer.mlp, "experts"):
+            unfuse_moe_experts(layer.mlp)
+    print("  Experts unfused: individual modules ready for patching")
 
     layer_loss: list[list[list[float]]] = [[] for _ in range(num_layers)]
     layer_loss_save = {}
@@ -289,6 +465,23 @@ def get_model_quant_error(
         for layer_idx in tqdm(range(num_layers), desc="Layers"):
             layer = layers[layer_idx]
 
+            # ── Capture per-expert routing distribution ──────────────────
+            expert_token_counts = torch.zeros(num_experts, dtype=torch.long, device=dev)
+
+            def _routing_hook(module, input, output,
+                              _counts=expert_token_counts):
+                # output layout: (router_logits, router_scores, router_indices)
+                # router_indices: [num_tokens, top_k]
+                indices = output[2].flatten()
+                _counts.index_add_(
+                    0, indices,
+                    torch.ones_like(indices, dtype=torch.long),
+                )
+
+            hook_handle = None
+            if hasattr(layer.mlp, "gate"):
+                hook_handle = layer.mlp.gate.register_forward_hook(_routing_hook)
+
             with torch.inference_mode():
                 # 1. get the output of the full precision layer
                 for i in range(num_samples):
@@ -299,26 +492,41 @@ def get_model_quant_error(
                         position_embeddings=pos_emb,
                     )[0].to(torch.float64)
 
-            # 2. get the output of the NVFP4-quantized layer
-            experts = get_experts(layer, model_type, num_experts)
-            num_layer_experts = len(experts)
+            if hook_handle is not None:
+                hook_handle.remove()
+
+            # Print routing stats
+            total_assignments = expert_token_counts.sum().item()
+            total_tokens = num_samples * seqlen
+            if total_assignments > 0:
+                mean_c = expert_token_counts.float().mean().item()
+                std_c = expert_token_counts.float().std().item()
+                cv = std_c / mean_c if mean_c > 0 else 0
+                print(f"  Layer {layer_idx}: {total_tokens} tokens × top-{total_assignments // total_tokens} "
+                      f"= {total_assignments} total assignments over {num_samples} samples")
+                print(f"    per-expert tokens: min={expert_token_counts.min().item()} "
+                      f"max={expert_token_counts.max().item()} "
+                      f"mean={mean_c:.1f} std={std_c:.1f} CV={cv:.3f}")
+
+            # 2. get the output of the quantized layer
+            experts = get_experts(layer, model_type)
+            num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
 
             for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
                 expert = experts[exp_id]
-                expert_err = []
 
-                for qlinear_block, block_name in zip(block_labels, block_names):
-                    linear: nn.Linear = getattr(expert, block_name, None)
-                    if linear is None or not hasattr(linear, "weight"):
-                        expert_err.append(0.0)
-                        continue
+                if joint:
+                    # ── Joint mode: patch ALL linears at once, single error ───
+                    orig_forwards = {}
+                    for block_name in block_names:
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            continue
+                        orig_forwards[block_name] = linear.forward
+                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                        linear.forward = quant_fwd
 
                     with torch.inference_mode():
-                        # Patch: replace this ONE linear with NVFP4 compute
-                        orig_forward = linear.forward
-                        nvfp4_fwd, _ = make_nvfp4_forward(linear, backend=backend)
-                        linear.forward = nvfp4_fwd
-
                         for i in range(num_samples):
                             quantized_outs[i] = layer(
                                 inps[i].unsqueeze(0),
@@ -327,22 +535,60 @@ def get_model_quant_error(
                                 position_embeddings=pos_emb,
                             )[0].to(torch.float64)
 
-                        # 3. calculate the quantization error
-                        quant_err = torch.norm(quantized_outs - full_precision_outs).item()
-                        expert_err.append(quant_err)
+                    joint_err = torch.norm(quantized_outs - full_precision_outs).item()
 
-                        # 4. recover the FULL precision layer (unpatch)
-                        linear.forward = orig_forward
+                    # Restore all
+                    for block_name, orig_fwd in orig_forwards.items():
+                        getattr(expert, block_name).forward = orig_fwd
+
+                    expert_err = [joint_err]
+                else:
+                    # ── Per-linear mode: patch one linear at a time ───────────
+                    expert_err = []
+                    for qlinear_block, block_name in zip(block_labels, block_names):
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            expert_err.append(0.0)
+                            continue
+
+                        with torch.inference_mode():
+                            orig_forward = linear.forward
+                            quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                            linear.forward = quant_fwd
+
+                            for i in range(num_samples):
+                                quantized_outs[i] = layer(
+                                    inps[i].unsqueeze(0),
+                                    attention_mask=attn_mask,
+                                    position_ids=position_ids,
+                                    position_embeddings=pos_emb,
+                                )[0].to(torch.float64)
+
+                            quant_err = torch.norm(quantized_outs - full_precision_outs).item()
+                            expert_err.append(quant_err)
+                            linear.forward = orig_forward
 
                 layer_loss[layer_idx].append(expert_err)
-                print(f"  L{layer_idx}-E{exp_id} NVFP4 (layer_out_norm): {expert_err}")
+                label = "joint" if joint else "per-linear"
+                exp_tokens = expert_token_counts[exp_id].item() if exp_id < len(expert_token_counts) else 0
+                print(f"  L{layer_idx}-E{exp_id} {quant_mode} ({label}) "
+                      f"[{exp_tokens} tokens]: {expert_err}")
 
-            # 5. serialization (incremental, same format as quant.py)
+            # 5. serialization (incremental)
+            mean_tokens = expert_token_counts.float().mean().item() if total_assignments > 0 else 1.0
             os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+            layer_save = {}
+            for e in range(len(layer_loss[layer_idx])):
+                tok = expert_token_counts[e].item() if e < len(expert_token_counts) else 0
+                layer_save[e] = {
+                    "error": layer_loss[layer_idx][e],
+                    "tokens": tok,
+                    "token_ratio": round(tok / mean_tokens, 4) if mean_tokens > 0 else 0.0,
+                }
+            layer_loss_save[layer_idx] = layer_save
             with open(save_path, "w") as f:
-                layer_loss_save[layer_idx] = {e: layer_loss[layer_idx][e] for e in range(len(layer_loss[layer_idx]))}
                 json.dump(layer_loss_save, f)
-            print(f"  Layer-{layer_idx} quant error(layer_out_norm):\n{layer_loss[layer_idx]}")
+            print(f"  Layer-{layer_idx} saved ({len(layer_save)} experts)")
 
             # 6. prepare the inputs for next layer
             inps = full_precision_outs.to(inps.dtype)
@@ -358,50 +604,121 @@ def get_model_quant_error(
         )
         quantized_outs: Tensor = torch.zeros_like(full_precision_outs)
 
+        # ── Capture per-layer routing during full-precision pass ────
+        per_layer_counts = {li: torch.zeros(num_experts, dtype=torch.long, device=dev)
+                            for li in range(num_layers)}
+
+        def _make_model_routing_hook(layer_idx):
+            counts = per_layer_counts[layer_idx]
+            def hook(module, input, output, _counts=counts):
+                indices = output[2].flatten()
+                _counts.index_add_(
+                    0, indices,
+                    torch.ones_like(indices, dtype=torch.long),
+                )
+            return hook
+
+        hook_handles = []
+        for li in range(num_layers):
+            if hasattr(layers[li].mlp, "gate"):
+                h = layers[li].mlp.gate.register_forward_hook(_make_model_routing_hook(li))
+                hook_handles.append(h)
+
         # 1. get the output of full-precision model (hidden_states of the last layer)
         with torch.inference_mode():
             for i in tqdm(range(num_samples), desc="Full precision output"):
                 full_precision_outs[i] = model.model(inps[i:i+1, :]).last_hidden_state.to(torch.float64)
 
-        # 2. get the model output with NVFP4-quantized layer
+        for h in hook_handles:
+            h.remove()
+
+        # Print routing stats per layer
+        seqlen_model = inps.shape[-1]
+        total_tokens_model = num_samples * seqlen_model
+        for li in range(num_layers):
+            counts = per_layer_counts[li]
+            total = counts.sum().item()
+            if total > 0:
+                mean_c = counts.float().mean().item()
+                std_c = counts.float().std().item()
+                cv = std_c / mean_c if mean_c > 0 else 0
+                print(f"  Layer {li}: {total_tokens_model} tokens × top-{total // total_tokens_model} "
+                      f"= {total} total assignments over {num_samples} samples")
+                print(f"    per-expert tokens: min={counts.min().item()} "
+                      f"max={counts.max().item()} "
+                      f"mean={mean_c:.1f} std={std_c:.1f} CV={cv:.3f}")
+
+        # 2. get the model output with quantized layer
         for layer_idx in tqdm(range(num_layers), desc="Layers"):
-            experts = get_experts(layers[layer_idx], model_type, num_experts)
-            num_layer_experts = len(experts)
+            experts = get_experts(layers[layer_idx], model_type)
+            num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
 
             for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
                 expert = experts[exp_id]
-                expert_err = []
 
-                for qlinear_block, block_name in zip(block_labels, block_names):
-                    linear: nn.Linear = getattr(expert, block_name, None)
-                    if linear is None or not hasattr(linear, "weight"):
-                        expert_err.append(0.0)
-                        continue
-
-                    # Patch: replace this ONE linear with NVFP4 compute
-                    orig_forward = linear.forward
-                    nvfp4_fwd, _ = make_nvfp4_forward(linear, backend=backend)
-                    linear.forward = nvfp4_fwd
+                if joint:
+                    # ── Joint mode: patch ALL linears at once, single error ───
+                    orig_forwards = {}
+                    for block_name in block_names:
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            continue
+                        orig_forwards[block_name] = linear.forward
+                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                        linear.forward = quant_fwd
 
                     with torch.inference_mode():
                         for i in range(num_samples):
                             quantized_outs[i] = model.model(inps[i:i+1, :]).last_hidden_state.to(torch.float64)
 
-                        # 3. calculate the quantization error
-                        quant_err = torch.norm(quantized_outs.sub_(full_precision_outs)).item()
-                        expert_err.append(quant_err)
+                    joint_err = torch.norm(quantized_outs - full_precision_outs).item()
 
-                        # 4. recover the FULL precision layer (unpatch)
-                        linear.forward = orig_forward
+                    for block_name, orig_fwd in orig_forwards.items():
+                        getattr(expert, block_name).forward = orig_fwd
+
+                    expert_err = [joint_err]
+                else:
+                    # ── Per-linear mode: patch one linear at a time ───────────
+                    expert_err = []
+                    for qlinear_block, block_name in zip(block_labels, block_names):
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            expert_err.append(0.0)
+                            continue
+
+                        orig_forward = linear.forward
+                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                        linear.forward = quant_fwd
+
+                        with torch.inference_mode():
+                            for i in range(num_samples):
+                                quantized_outs[i] = model.model(inps[i:i+1, :]).last_hidden_state.to(torch.float64)
+
+                            quant_err = torch.norm(quantized_outs.sub_(full_precision_outs)).item()
+                            expert_err.append(quant_err)
+                            linear.forward = orig_forward
 
                 layer_loss[layer_idx].append(expert_err)
-                print(f"  L{layer_idx}-E{exp_id} NVFP4 (model_out_norm): {expert_err}")
+                label = "joint" if joint else "per-linear"
+                exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                print(f"  L{layer_idx}-E{exp_id} {quant_mode} ({label}) "
+                      f"[{exp_tokens} tokens]: {expert_err}")
 
             # 5. serialization
+            counts = per_layer_counts[layer_idx]
+            mean_tokens = counts.float().mean().item() if counts.sum().item() > 0 else 1.0
+            layer_save = {}
+            for e in range(len(layer_loss[layer_idx])):
+                tok = counts[e].item() if e < len(counts) else 0
+                layer_save[e] = {
+                    "error": layer_loss[layer_idx][e],
+                    "tokens": tok,
+                    "token_ratio": round(tok / mean_tokens, 4) if mean_tokens > 0 else 0.0,
+                }
+            layer_loss_save[layer_idx] = layer_save
             with open(save_path, "w") as f:
-                layer_loss_save[layer_idx] = {e: layer_loss[layer_idx][e] for e in range(len(layer_loss[layer_idx]))}
                 json.dump(layer_loss_save, f)
-            print(f"  Layer-{layer_idx} quant error(model_out_norm): {layer_loss[layer_idx]}")
+            print(f"  Layer-{layer_idx} saved ({len(layer_save)} experts)")
 
     else:
         raise ValueError(f"Unknown metric: {metric}")
@@ -429,22 +746,33 @@ def seed_everything(seed: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="NVFP4 (W4A4) Quantization Sensitivity Analysis for MoE Models",
+        description="Quantization Sensitivity Analysis for MoE Models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # layer_out_norm
-  python nf4_sensitivity.py --model_path /path/to/model --metric layer_out_norm
+Quantization modes:
+  nvfp4   W4A4  — real FP4 GEMM via FlashInfer mm_fp4 (Blackwell GPU required)
+  fp8     W8A8  — fake-quantize weight+activation to FP8 E4M3, BF16 matmul
+  a16w4   W4A16 — fake-quantize weight to FP4 E2M1 (per-block), BF16 activation
 
-  # model_out_norm
-  python nf4_sensitivity.py --model_path /path/to/model --metric model_out_norm
+Examples:
+  # NVFP4 (W4A4) sensitivity — real FP4 compute
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4
+
+  # FP8 (W8A8) sensitivity
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode fp8
+
+  # Weight-only FP4 (W4A16) sensitivity
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode a16w4
 
   # Quick test (1 layer)
-  python nf4_sensitivity.py --model_path /path/to/model --metric layer_out_norm --max_layers 1
+  python nf4_sensitivity.py --model_path /path/to/model --max_layers 1
         """,
     )
     parser.add_argument("--model_path", type=str, required=True,
                         help="Path to HuggingFace model directory")
+    parser.add_argument("--quant_mode", type=str, default="nvfp4",
+                        choices=["nvfp4", "fp8", "a16w4"],
+                        help="Quantization mode (default: nvfp4)")
     parser.add_argument("--metric", type=str, default="layer_out_norm",
                         choices=["layer_out_norm", "model_out_norm"],
                         help="Sensitivity metric (default: layer_out_norm)")
@@ -454,13 +782,19 @@ Examples:
                         help="Sequence length (default: 4096)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
-    parser.add_argument("--save_path", type=str, default="./calib/nvfp4_sensitivity.json",
+    parser.add_argument("--save_path", type=str, default="./calib/sensitivity.json",
                         help="Output JSON path")
     parser.add_argument("--max_layers", type=int, default=-1,
                         help="Max layers to process (-1 = all)")
+    parser.add_argument("--max_experts", type=int, default=-1,
+                        help="Max experts to analyze per layer (-1 = all)")
+    parser.add_argument("--joint", action="store_true",
+                        help="Quantize all three linears (gate/up/down) simultaneously "
+                             "instead of one at a time. Produces a single error per expert "
+                             "and runs ~3x faster.")
     parser.add_argument("--backend", type=str, default="cudnn",
                         choices=["cudnn", "cutlass", "auto"],
-                        help="FlashInfer mm_fp4 backend (default: cudnn — most stable on SM120)")
+                        help="FlashInfer mm_fp4 backend for nvfp4 mode (default: cudnn)")
 
     args = parser.parse_args()
     seed_everything(args.seed)
@@ -473,5 +807,8 @@ Examples:
         metric=args.metric,
         save_path=args.save_path,
         max_layers=args.max_layers,
+        max_experts=args.max_experts,
         backend=args.backend,
+        quant_mode=args.quant_mode,
+        joint=args.joint,
     )
