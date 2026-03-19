@@ -16,7 +16,6 @@ from typing import List, Optional
 
 import torch
 
-from heter_moe.ops.hetero_moe import create_subset_weights
 from heter_moe.policy.scheduler import PrecisionScheduler
 from heter_moe.policy.strategies import RandomStrategy
 
@@ -164,6 +163,8 @@ class HeteroConfigSweeper:
         seed: int,
     ) -> SweepResult:
         """Measure one configuration using actual CUTLASS kernels."""
+        from heter_moe.ops.hetero_moe import create_subset_weights
+
         num_tokens = config.batch_size
 
         # Synthetic inputs

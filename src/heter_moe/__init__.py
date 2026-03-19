@@ -31,7 +31,7 @@ from heter_moe.integrations.trtllm import (
 )
 
 # Policy — config sweep
-from heter_moe.policy.config_sweep import HeteroConfigSweeper
+# from heter_moe.policy.config_sweep import HeteroConfigSweeper
 
 __all__ = [
     # Ops

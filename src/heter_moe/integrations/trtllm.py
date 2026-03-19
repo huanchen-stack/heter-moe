@@ -68,14 +68,14 @@ def patch_moe_factory(
         seed: Random seed for the ``RandomStrategy``.
         hot_expert_ids: Expert IDs forced to BF16 regardless of ratio.
     """
-    import tensorrt_llm._torch.modules.fused_moe.create_moe as factory_module
+    import tensorrt_llm._torch.modules.fused_moe.create_moe.create_moe_backend as factory_module
     from tensorrt_llm._torch.modules.fused_moe.fused_moe_cutlass import (
         CutlassFusedMoE,
     )
 
     from heter_moe.ops.hetero_moe import HeteroCutlassFusedMoE
 
-    _original = factory_module.create_moe_backend
+    _original = factory_module
 
     def _patched(moe_cls, *args, **kwargs):  # type: ignore[no-untyped-def]
         if moe_cls is CutlassFusedMoE:
@@ -98,7 +98,7 @@ def patch_moe_factory(
             )
         return _original(moe_cls, *args, **kwargs)
 
-    factory_module.create_moe_backend = _patched
+    factory_module = _patched
 
 
 def unpatch_moe_factory() -> None:
