@@ -58,26 +58,25 @@ log "Installing dependencies..."
 pip install -r "${SCRIPT_DIR}/requirements_nvfp4.txt" --quiet 2>&1 | tail -3 || true
 
 log "Checking environment..."
-python3 -c "
+python -c "
 import torch
 print(f'  PyTorch: {torch.__version__}')
 print(f'  CUDA:    {torch.cuda.is_available()} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"})')
 if torch.cuda.is_available():
     cap = torch.cuda.get_device_capability(0)
     print(f'  SM:      {cap[0]}{cap[1]}')
-    print(f'  VRAM:    {torch.cuda.get_device_properties(0).total_mem/1e9:.1f} GB')
 " || err "PyTorch not available"
 
-python3 -c "from flashinfer import mm_fp4; print('  FlashInfer: OK')" 2>/dev/null \
+python -c "from flashinfer import mm_fp4; print('  FlashInfer: OK')" 2>/dev/null \
     || warn "FlashInfer not installed — run: pip install flashinfer-python>=0.6.5"
 
-python3 -c "import transformers; print(f'  Transformers: {transformers.__version__}')" \
+python -c "import transformers; print(f'  Transformers: {transformers.__version__}')" \
     || err "transformers not installed"
 
-python3 -c "from safetensors.torch import load_file; print('  Safetensors: OK')" \
+python -c "from safetensors.torch import load_file; print('  Safetensors: OK')" \
     || err "safetensors not installed"
 
-python3 -c "from datasets import load_dataset; print('  Datasets: OK')" \
+python -c "from datasets import load_dataset; print('  Datasets: OK')" \
     || err "datasets not installed"
 
 echo ""
@@ -90,7 +89,7 @@ if [ "$SKIP_DOWNLOAD" = false ]; then
     echo " Step 1: Download models"
     echo "============================================================"
 
-    python3 "${SCRIPT_DIR}/downloader.py" --base_dir "${MODEL_DIR}"
+    python "${SCRIPT_DIR}/downloader.py" --base_dir "${MODEL_DIR}"
 
     log "Downloads complete"
 else
@@ -125,7 +124,7 @@ verify_model() {
     fi
 
     # Verify with Python
-    python3 -c "
+    python -c "
 from transformers import AutoConfig
 config = AutoConfig.from_pretrained('${model_dir}', trust_remote_code=True)
 print(f'  ${model_name}:')
@@ -155,7 +154,7 @@ sanity_test() {
     local model_name=$2
 
     log "Testing ${model_name} inference..."
-    python3 -c "
+    python -c "
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -213,7 +212,7 @@ run_sensitivity() {
     log "Running: ${model_name} metric=${metric} nsamples=${NSAMPLES}"
     echo "  Save: ${save_path}"
 
-    python3 "${SCRIPT_DIR}/nf4_sensitivity.py" \
+    python "${SCRIPT_DIR}/nf4_sensitivity.py" \
         --model_path "${model_dir}" \
         --metric "${metric}" \
         --nsamples "${NSAMPLES}" \
@@ -223,17 +222,17 @@ run_sensitivity() {
 
     if [ $? -eq 0 ] && [ -f "$save_path" ]; then
         local n_layers
-        n_layers=$(python3 -c "import json; d=json.load(open('${save_path}')); print(len(d))")
+        n_layers=$(python -c "import json; d=json.load(open('${save_path}')); print(len(d))")
         log "Done: ${save_name} (${n_layers} layers saved)"
     else
         err "FAILED: ${save_name}"
     fi
 }
 
-# ── Qwen1.5-MoE-A2.7B (14.3B, 24 layers, 60 experts + 1 shared) ────────────
-echo ""
-echo "--- Qwen1.5-MoE-A2.7B ---"
-run_sensitivity "${QWEN15_DIR}" "qwen15-moe-a2.7b" "layer_out_norm"
+# # ── Qwen1.5-MoE-A2.7B (14.3B, 24 layers, 60 experts + 1 shared) ────────────
+# echo ""
+# echo "--- Qwen1.5-MoE-A2.7B ---"
+# run_sensitivity "${QWEN15_DIR}" "qwen15-moe-a2.7b" "layer_out_norm"
 
 # ── Qwen3-30B-A3B (30B, 48 layers, 128 experts, top-8) ──────────────────────
 echo ""
@@ -250,7 +249,7 @@ echo "============================================================"
 
 for f in "${CALIB_DIR}"/*.json; do
     if [ -f "$f" ]; then
-        n_layers=$(python3 -c "import json; d=json.load(open('$f')); print(len(d))" 2>/dev/null || echo "?")
+        n_layers=$(python -c "import json; d=json.load(open('$f')); print(len(d))" 2>/dev/null || echo "?")
         size=$(du -h "$f" | cut -f1)
         echo "  ${f}  (${n_layers} layers, ${size})"
     fi

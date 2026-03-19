@@ -16,3 +16,6 @@ flashinfer-python>=0.6.5
 # Utilities
 tqdm
 numpy
+
+
+accelerate

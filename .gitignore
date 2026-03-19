@@ -3,3 +3,4 @@ acc_exp/experiment_results/
 TensorRT-LLM
 *__pycache__*
 *egg-info*
+*models*
