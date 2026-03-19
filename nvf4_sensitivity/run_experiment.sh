@@ -2,17 +2,17 @@
 # =============================================================================
 # NVFP4 Sensitivity Analysis — Full Experiment Pipeline
 #
-# Downloads models, verifies, runs sanity inference, then runs NVFP4
-# sensitivity analysis on both models.
+# Downloads Qwen3-30B-A3B, verifies, runs sanity inference, then runs NVFP4
+# sensitivity analysis.
 #
 # Requirements:
 #   - Blackwell GPU (RTX 6000 Pro / SM120, or B200 / SM100)
 #   - CUDA 12.8+, cuDNN 9.x
-#   - ~100GB disk (Qwen1.5-MoE ~29GB + Qwen3-30B ~60GB)
+#   - ~60GB disk (Qwen3-30B-A3B)
 #
 # Usage:
-#   bash run_experiment.sh              # full pipeline (both models)
-#   bash run_experiment.sh --skip-download   # skip download, run experiments only
+#   bash run_experiment.sh                    # full pipeline
+#   bash run_experiment.sh --skip-download    # skip download, run experiment only
 # =============================================================================
 
 set -euo pipefail
@@ -24,8 +24,7 @@ NSAMPLES=128
 SEQLEN=4096
 BACKEND="cudnn"
 
-# Model paths
-QWEN15_DIR="${MODEL_DIR}/Qwen1.5-MoE-A2.7B"
+# Model path
 QWEN3_DIR="${MODEL_DIR}/Qwen3-30B-A3B"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -82,26 +81,26 @@ python -c "from datasets import load_dataset; print('  Datasets: OK')" \
 echo ""
 
 # =============================================================================
-# STEP 1: Download models
+# STEP 1: Download model
 # =============================================================================
 if [ "$SKIP_DOWNLOAD" = false ]; then
     echo "============================================================"
-    echo " Step 1: Download models"
+    echo " Step 1: Download model"
     echo "============================================================"
 
     python "${SCRIPT_DIR}/downloader.py" --base_dir "${MODEL_DIR}"
 
-    log "Downloads complete"
+    log "Download complete"
 else
     warn "Skipping download (--skip-download)"
 fi
 
 # =============================================================================
-# STEP 2: Verify downloads
+# STEP 2: Verify download
 # =============================================================================
 echo ""
 echo "============================================================"
-echo " Step 2: Verify model downloads"
+echo " Step 2: Verify model download"
 echo "============================================================"
 
 verify_model() {
@@ -138,8 +137,7 @@ print(f'    safetensors:   ${n_safetensors} files')
     log "${model_name} verified"
 }
 
-verify_model "${QWEN15_DIR}" "Qwen1.5-MoE-A2.7B"
-verify_model "${QWEN3_DIR}"  "Qwen3-30B-A3B"
+verify_model "${QWEN3_DIR}" "Qwen3-30B-A3B"
 
 # =============================================================================
 # STEP 3: Sanity inference test
@@ -184,8 +182,7 @@ torch.cuda.empty_cache()
     log "${model_name} inference passed"
 }
 
-sanity_test "${QWEN15_DIR}" "Qwen1.5-MoE-A2.7B"
-sanity_test "${QWEN3_DIR}"  "Qwen3-30B-A3B"
+sanity_test "${QWEN3_DIR}" "Qwen3-30B-A3B"
 
 # =============================================================================
 # STEP 4: Run NVFP4 sensitivity analysis
@@ -228,11 +225,6 @@ run_sensitivity() {
         err "FAILED: ${save_name}"
     fi
 }
-
-# # ── Qwen1.5-MoE-A2.7B (14.3B, 24 layers, 60 experts + 1 shared) ────────────
-# echo ""
-# echo "--- Qwen1.5-MoE-A2.7B ---"
-# run_sensitivity "${QWEN15_DIR}" "qwen15-moe-a2.7b" "layer_out_norm"
 
 # ── Qwen3-30B-A3B (30B, 48 layers, 128 experts, top-8) ──────────────────────
 echo ""
