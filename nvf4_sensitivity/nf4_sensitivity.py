@@ -937,9 +937,9 @@ def get_model_quant_error(
 
         inps = torch.vstack([d.to(dev) for d in dataloader])  # [num_samples, seqlen]
 
-        # ── Patch ALL experts in ALL layers ───────────────────────────────
-        print("Patching all experts with quantized forwards...")
-        all_orig_forwards: list[tuple[nn.Linear, object]] = []
+        # ── Pre-compute ALL quant forwards once (no per-sample re-creation) ──
+        print("Pre-computing quantized forwards for all experts...")
+        all_forwards: list[tuple[nn.Linear, object, object]] = []  # (linear, orig_fwd, quant_fwd)
         patched_count = 0
         for layer_idx in range(num_layers):
             experts = get_experts(layers[layer_idx], model_type)
@@ -950,142 +950,75 @@ def get_model_quant_error(
                     linear: nn.Linear = getattr(expert, block_name, None)
                     if linear is None or not hasattr(linear, "weight"):
                         continue
-                    all_orig_forwards.append((linear, linear.forward))
+                    orig_fwd = linear.forward
                     quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
-                    linear.forward = quant_fwd
+                    all_forwards.append((linear, orig_fwd, quant_fwd))
                     patched_count += 1
-        print(f"  Patched {patched_count} linears across {num_layers} layers")
+        print(f"  {patched_count} linears across {num_layers} layers ready")
 
-        # ── Compute reference (BF16) and quantized outputs ───────────────
-        # Use perplexity + KL divergence as aggregate metrics
-        print("Computing reference (BF16) outputs...")
-        # Unpatch temporarily for reference
-        for linear, orig_fwd in all_orig_forwards:
-            linear.forward = orig_fwd
+        def unpatch_all():
+            for lin, ofwd, _ in all_forwards:
+                lin.forward = ofwd
 
+        def patch_all():
+            for lin, _, qfwd in all_forwards:
+                lin.forward = qfwd
+
+        # ── Lockstep: ref + quant per sample ─────────────────────────────
+        # Two forwards per sample (unavoidable — storing ref log-probs for
+        # the full vocab across all samples would be hundreds of GB).
+        # Quant closures are pre-computed; patch/unpatch is just pointer swaps.
         ref_nll_sum = 0.0
         ref_n_tokens = 0
-        kl_sum = 0.0
-
-        with torch.inference_mode():
-            for i in tqdm(range(num_samples), desc="Reference + quantized"):
-                input_ids = inps[i:i+1, :]  # [1, seqlen]
-
-                # Reference forward
-                ref_logits = model(input_ids).logits.float()  # [1, seqlen, vocab]
-                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
-
-                # Reference perplexity (next-token prediction)
-                # logits[i] predicts token[i+1]
-                shift_lp = ref_lp[:, :-1, :]       # [1, seqlen-1, vocab]
-                shift_targets = input_ids[:, 1:]    # [1, seqlen-1]
-                nll = -shift_lp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
-                ref_nll_sum += nll.sum().item()
-                ref_n_tokens += nll.numel()
-
-                ref_p = ref_lp.exp()
-
-                # Repatch for quantized forward
-                for linear, _ in all_orig_forwards:
-                    # Find and apply the quant forward again
-                    pass
-                # More efficient: just re-apply all patches
-                del ref_logits  # free before quantized forward
-
-        # Actually, let's do it properly: reference pass, then quantized pass
-        # Reference pass (already unpatched above)
-        ref_nll_sum = 0.0
-        ref_n_tokens = 0
-        ref_log_probs_list = []  # store ONE at a time below
-
-        print("  Reference pass...")
-        with torch.inference_mode():
-            for i in tqdm(range(num_samples), desc="BF16 reference"):
-                ref_logits = model(inps[i:i+1, :]).logits.float()
-                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
-                shift_lp = ref_lp[:, :-1, :]
-                shift_targets = inps[i:i+1, 1:]
-                nll = -shift_lp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
-                ref_nll_sum += nll.sum().item()
-                ref_n_tokens += nll.numel()
-                del ref_logits, ref_lp, shift_lp, nll
-
-        ref_ppl = torch.exp(torch.tensor(ref_nll_sum / max(ref_n_tokens, 1))).item()
-        print(f"  Reference perplexity: {ref_ppl:.4f}")
-
-        # Re-patch all
-        patch_idx = 0
-        for layer_idx in range(num_layers):
-            experts = get_experts(layers[layer_idx], model_type)
-            n = len(experts) if max_experts < 0 else min(max_experts, len(experts))
-            for exp_id in range(n):
-                expert = experts[exp_id]
-                for block_name in block_names:
-                    linear: nn.Linear = getattr(expert, block_name, None)
-                    if linear is None or not hasattr(linear, "weight"):
-                        continue
-                    quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
-                    linear.forward = quant_fwd
-
-        # Quantized pass
         quant_nll_sum = 0.0
         quant_n_tokens = 0
         kl_sum = 0.0
         kl_n_tokens = 0
 
-        print(f"  Quantized pass ({quant_mode}, all experts)...")
-        # Need reference log probs for KL — compute both in lockstep
-        # Unpatch → ref, repatch → quant, per sample
-        for linear, orig_fwd in all_orig_forwards:
-            linear.forward = orig_fwd  # unpatch all first
-
+        print(f"  Lockstep BF16 vs {quant_mode} ({num_samples} samples)...")
         with torch.inference_mode():
-            for i in tqdm(range(num_samples), desc=f"All-{quant_mode}"):
+            for i in tqdm(range(num_samples), desc=f"BF16 vs {quant_mode}"):
                 input_ids = inps[i:i+1, :]
+                shift_targets = input_ids[:, 1:]  # [1, seqlen-1]
 
-                # Reference (unpatched)
+                # ── Reference forward (unpatched) ────────────────────────
+                unpatch_all()
                 ref_logits = model(input_ids).logits.float()
                 ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
                 del ref_logits
 
-                # Repatch all
-                patch_idx = 0
-                for layer_idx in range(num_layers):
-                    exps = get_experts(layers[layer_idx], model_type)
-                    n = len(exps) if max_experts < 0 else min(max_experts, len(exps))
-                    for exp_id in range(n):
-                        expert = exps[exp_id]
-                        for block_name in block_names:
-                            linear = getattr(expert, block_name, None)
-                            if linear is None or not hasattr(linear, "weight"):
-                                continue
-                            quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
-                            linear.forward = quant_fwd
+                # Reference NLL
+                ref_nll = -ref_lp[:, :-1, :].gather(
+                    dim=-1, index=shift_targets.unsqueeze(-1),
+                ).squeeze(-1)
+                ref_nll_sum += ref_nll.sum().item()
+                ref_n_tokens += ref_nll.numel()
+                del ref_nll
 
-                # Quantized forward
+                # ── Quantized forward (patched) ──────────────────────────
+                patch_all()
                 q_logits = model(input_ids).logits.float()
                 q_lp = torch.nn.functional.log_softmax(q_logits, dim=-1)
                 del q_logits
 
-                # Quantized perplexity
-                shift_qlp = q_lp[:, :-1, :]
-                shift_targets = input_ids[:, 1:]
-                nll = -shift_qlp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
-                quant_nll_sum += nll.sum().item()
-                quant_n_tokens += nll.numel()
+                # Quantized NLL
+                q_nll = -q_lp[:, :-1, :].gather(
+                    dim=-1, index=shift_targets.unsqueeze(-1),
+                ).squeeze(-1)
+                quant_nll_sum += q_nll.sum().item()
+                quant_n_tokens += q_nll.numel()
+                del q_nll
 
-                # KL(P_ref || Q_quant)
+                # ── KL(P_ref || Q_quant) ─────────────────────────────────
                 ref_p = ref_lp.exp()
                 kl_per_token = (ref_p * (ref_lp - q_lp)).sum(dim=-1)
                 kl_sum += kl_per_token.sum().item()
                 kl_n_tokens += kl_per_token.numel()
+                del ref_lp, ref_p, q_lp, kl_per_token
 
-                del ref_lp, ref_p, q_lp, kl_per_token, nll
+        unpatch_all()
 
-                # Unpatch all for next reference forward
-                for linear, orig_fwd in all_orig_forwards:
-                    linear.forward = orig_fwd
-
+        ref_ppl = torch.exp(torch.tensor(ref_nll_sum / max(ref_n_tokens, 1))).item()
         quant_ppl = torch.exp(torch.tensor(quant_nll_sum / max(quant_n_tokens, 1))).item()
         mean_kl = kl_sum / max(kl_n_tokens, 1)
 
@@ -1116,10 +1049,6 @@ def get_model_quant_error(
         with open(save_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"  Saved to {save_path}")
-
-        # Restore all
-        for linear, orig_fwd in all_orig_forwards:
-            linear.forward = orig_fwd
 
     else:
         raise ValueError(f"Unknown metric: {metric}")
