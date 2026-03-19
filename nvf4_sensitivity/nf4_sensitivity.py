@@ -400,6 +400,7 @@ def get_model_quant_error(
     backend: str = "cudnn",
     quant_mode: str = "nvfp4",
     joint: bool = False,
+    resume: bool = False,
 ):
     """
     NVFP4 quantization sensitivity analysis.
@@ -461,6 +462,15 @@ def get_model_quant_error(
 
     layer_loss: list[list[list[float]]] = [[] for _ in range(num_layers)]
     layer_loss_save = {}
+
+    # ── Resume: load existing results from save_path ─────────────────
+    if resume and os.path.exists(save_path):
+        with open(save_path) as f:
+            layer_loss_save = json.load(f)
+        # Convert string keys back to int
+        layer_loss_save = {int(k): v for k, v in layer_loss_save.items()}
+        n_existing = sum(len(v) for v in layer_loss_save.values())
+        print(f"  Resume: loaded {n_existing} existing expert results from {save_path}")
 
     ################# METRIC 1: LAYER-LOCAL SENSITIVITY (layer_out_norm) #################
     if metric == "layer_out_norm":
@@ -531,6 +541,17 @@ def get_model_quant_error(
             num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
 
             for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
+                # ── Resume: skip if this layer-expert already exists ─────
+                if resume and layer_idx in layer_loss_save:
+                    existing = layer_loss_save[layer_idx]
+                    if str(exp_id) in existing or exp_id in existing:
+                        entry = existing.get(str(exp_id), existing.get(exp_id))
+                        cached_err = entry["error"] if isinstance(entry, dict) else entry
+                        layer_loss[layer_idx].append(cached_err)
+                        exp_tokens = expert_token_counts[exp_id].item() if exp_id < len(expert_token_counts) else 0
+                        print(f"  L{layer_idx}-E{exp_id} SKIP (resumed) [{exp_tokens} tokens]: {cached_err}")
+                        continue
+
                 expert = experts[exp_id]
 
                 if joint:
@@ -672,6 +693,17 @@ def get_model_quant_error(
             num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
 
             for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
+                # ── Resume: skip if this layer-expert already exists ─────
+                if resume and layer_idx in layer_loss_save:
+                    existing = layer_loss_save[layer_idx]
+                    if str(exp_id) in existing or exp_id in existing:
+                        entry = existing.get(str(exp_id), existing.get(exp_id))
+                        cached_err = entry["error"] if isinstance(entry, dict) else entry
+                        layer_loss[layer_idx].append(cached_err)
+                        exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                        print(f"  L{layer_idx}-E{exp_id} SKIP (resumed) [{exp_tokens} tokens]: {cached_err}")
+                        continue
+
                 expert = experts[exp_id]
 
                 if joint:
@@ -806,6 +838,9 @@ Examples:
                         help="Max layers to process (-1 = all)")
     parser.add_argument("--max_experts", type=int, default=-1,
                         help="Max experts to analyze per layer (-1 = all)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip layer-expert pairs that already exist in the output JSON. "
+                             "Useful for resuming interrupted runs.")
     parser.add_argument("--joint", action="store_true",
                         help="Quantize all three linears (gate/up/down) simultaneously "
                              "instead of one at a time. Produces a single error per expert "
@@ -829,4 +864,5 @@ Examples:
         backend=args.backend,
         quant_mode=args.quant_mode,
         joint=args.joint,
+        resume=args.resume,
     )
