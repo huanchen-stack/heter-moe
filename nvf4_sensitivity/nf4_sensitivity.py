@@ -772,18 +772,17 @@ def get_model_quant_error(
 
     ################# METRIC 3: KL DIVERGENCE ON LOGITS (kl_divergence) #################
     elif metric == "kl_divergence":
+        # Loop order: (samples → experts) so we only hold ONE sample's logits
+        # on GPU at a time. No CPU storage of reference log-probs.
+        #
+        # For each sample:
+        #   1. Reference forward (BF16) → ref_log_probs  [1, seqlen, vocab] on GPU
+        #   2. For each expert: patch → quantized forward → KL vs ref → unpatch
+        #   3. Discard ref_log_probs, next sample
 
         inps = torch.vstack([d.to(dev) for d in dataloader])  # [num_samples, seqlen]
-        vocab_size = model.config.vocab_size
 
-        # ── Reference logits (full precision) ────────────────────────────
-        # Store log-softmax of reference logits (more numerically stable for KL)
-        # Shape: [num_samples, seqlen, vocab_size] — large, but needed for KL
-        # Process one sample at a time to avoid OOM on the logits tensor
-        print("Computing reference logits (BF16)...")
-        ref_log_probs = []
-
-        # ── Capture per-layer routing ────────────────────────────────────
+        # ── Capture per-layer routing in a pre-pass ──────────────────────
         per_layer_counts = {li: torch.zeros(num_experts, dtype=torch.long, device=dev)
                             for li in range(num_layers)}
 
@@ -803,12 +802,10 @@ def get_model_quant_error(
                 h = layers[li].mlp.gate.register_forward_hook(_make_model_routing_hook(li))
                 hook_handles.append(h)
 
+        print("Routing pre-pass (reference forwards)...")
         with torch.inference_mode():
-            for i in tqdm(range(num_samples), desc="Reference logits"):
-                logits = model(inps[i:i+1, :]).logits  # [1, seqlen, vocab]
-                # Store log-softmax on CPU to save GPU memory
-                lp = torch.nn.functional.log_softmax(logits.float(), dim=-1).cpu()
-                ref_log_probs.append(lp.squeeze(0))    # [seqlen, vocab]
+            for i in tqdm(range(num_samples), desc="Routing pre-pass"):
+                _ = model(inps[i:i+1, :])
 
         for h in hook_handles:
             h.remove()
@@ -829,74 +826,95 @@ def get_model_quant_error(
                       f"max={counts.max().item()} "
                       f"mean={mean_c:.1f} std={std_c:.1f} CV={cv:.3f}")
 
-        # ── Per-expert KL divergence ─────────────────────────────────────
+        # ── Per-layer KL divergence ──────────────────────────────────────
         for layer_idx in tqdm(range(num_layers), desc="Layers"):
             experts = get_experts(layers[layer_idx], model_type)
             num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
 
-            for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
-                # ── Resume: skip if already exists ───────────────────────
-                if resume and layer_idx in layer_loss_save:
-                    existing = layer_loss_save[layer_idx]
-                    if str(exp_id) in existing or exp_id in existing:
-                        entry = existing.get(str(exp_id), existing.get(exp_id))
+            # Resume: skip entire layer if all experts already done
+            if resume and layer_idx in layer_loss_save:
+                existing = layer_loss_save[layer_idx]
+                all_done = all(
+                    (str(e) in existing or e in existing)
+                    for e in range(num_layer_experts)
+                )
+                if all_done:
+                    for e in range(num_layer_experts):
+                        entry = existing.get(str(e), existing.get(e))
                         cached_err = entry["error"] if isinstance(entry, dict) else entry
                         layer_loss[layer_idx].append(cached_err)
-                        exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
-                        print(f"  L{layer_idx}-E{exp_id} SKIP (resumed) [{exp_tokens} tokens]: {cached_err}")
-                        continue
+                    print(f"  Layer {layer_idx}: SKIP (all {num_layer_experts} experts resumed)")
+                    continue
 
-                expert = experts[exp_id]
+            # KL accumulators for this layer
+            kl_accum = [0.0] * num_layer_experts
+            n_tokens_accum = [0] * num_layer_experts
+            # Track which experts need computation
+            needs_compute = [True] * num_layer_experts
+            if resume and layer_idx in layer_loss_save:
+                existing = layer_loss_save[layer_idx]
+                for e in range(num_layer_experts):
+                    if str(e) in existing or e in existing:
+                        needs_compute[e] = False
 
-                if joint:
-                    orig_forwards = {}
-                    for block_name in block_names:
-                        linear: nn.Linear = getattr(expert, block_name, None)
-                        if linear is None or not hasattr(linear, "weight"):
-                            continue
-                        orig_forwards[block_name] = linear.forward
-                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
-                        linear.forward = quant_fwd
-                else:
-                    # For per-linear KL, patch all linears (same as joint)
-                    # because KL is computed at the model output, not per-linear
-                    orig_forwards = {}
-                    for block_name in block_names:
-                        linear: nn.Linear = getattr(expert, block_name, None)
-                        if linear is None or not hasattr(linear, "weight"):
-                            continue
-                        orig_forwards[block_name] = linear.forward
-                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
-                        linear.forward = quant_fwd
-
-                # Compute KL divergence: KL(P_ref || Q_quant)
-                kl_sum = 0.0
-                n_tokens = 0
+            for i in tqdm(range(num_samples), desc=f"L{layer_idx} samples", leave=False):
                 with torch.inference_mode():
-                    for i in range(num_samples):
-                        q_logits = model(inps[i:i+1, :]).logits  # [1, seqlen, vocab]
-                        q_log_probs = torch.nn.functional.log_softmax(
-                            q_logits.float(), dim=-1,
-                        ).squeeze(0).cpu()  # [seqlen, vocab]
+                    # 1. Reference forward (BF16, no patching) — one sample
+                    ref_logits = model(inps[i:i+1, :]).logits.float()  # [1, seq, vocab]
+                    ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+                    ref_p = ref_lp.exp()
+                    del ref_logits
 
-                        # KL(P || Q) = sum(P * (log P - log Q))
-                        p_log = ref_log_probs[i]       # [seqlen, vocab]
-                        p = p_log.exp()
-                        kl_per_token = (p * (p_log - q_log_probs)).sum(dim=-1)  # [seqlen]
-                        kl_sum += kl_per_token.sum().item()
-                        n_tokens += kl_per_token.numel()
+                    # 2. For each expert that needs computation
+                    for exp_id in range(num_layer_experts):
+                        if not needs_compute[exp_id]:
+                            continue
 
-                mean_kl = kl_sum / max(n_tokens, 1)
+                        expert = experts[exp_id]
 
-                # Restore
-                for block_name, orig_fwd in orig_forwards.items():
-                    getattr(expert, block_name).forward = orig_fwd
+                        # Patch all linears
+                        orig_forwards = {}
+                        for block_name in block_names:
+                            linear: nn.Linear = getattr(expert, block_name, None)
+                            if linear is None or not hasattr(linear, "weight"):
+                                continue
+                            orig_forwards[block_name] = linear.forward
+                            quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                            linear.forward = quant_fwd
 
-                expert_err = [mean_kl]
-                layer_loss[layer_idx].append(expert_err)
-                exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
-                print(f"  L{layer_idx}-E{exp_id} {quant_mode} (KL) "
-                      f"[{exp_tokens} tokens]: mean_KL={mean_kl:.6f}")
+                        # Quantized forward
+                        q_logits = model(inps[i:i+1, :]).logits.float()
+                        q_lp = torch.nn.functional.log_softmax(q_logits, dim=-1)
+                        del q_logits
+
+                        # KL(P_ref || Q_quant) = sum(P * (log P - log Q))
+                        kl_per_token = (ref_p * (ref_lp - q_lp)).sum(dim=-1)  # [1, seqlen]
+                        kl_accum[exp_id] += kl_per_token.sum().item()
+                        n_tokens_accum[exp_id] += kl_per_token.numel()
+                        del q_lp, kl_per_token
+
+                        # Unpatch
+                        for bn, orig_fwd in orig_forwards.items():
+                            getattr(expert, bn).forward = orig_fwd
+
+                    del ref_lp, ref_p
+
+            # Finalize per-expert KL for this layer
+            for exp_id in range(num_layer_experts):
+                if not needs_compute[exp_id]:
+                    existing = layer_loss_save[layer_idx]
+                    entry = existing.get(str(exp_id), existing.get(exp_id))
+                    cached_err = entry["error"] if isinstance(entry, dict) else entry
+                    layer_loss[layer_idx].append(cached_err)
+                    exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                    print(f"  L{layer_idx}-E{exp_id} SKIP (resumed) [{exp_tokens} tokens]: {cached_err}")
+                else:
+                    mean_kl = kl_accum[exp_id] / max(n_tokens_accum[exp_id], 1)
+                    expert_err = [mean_kl]
+                    layer_loss[layer_idx].append(expert_err)
+                    exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                    print(f"  L{layer_idx}-E{exp_id} {quant_mode} (KL) "
+                          f"[{exp_tokens} tokens]: mean_KL={mean_kl:.6f}")
 
             # Serialization
             counts = per_layer_counts[layer_idx]
@@ -913,6 +931,195 @@ def get_model_quant_error(
             with open(save_path, "w") as f:
                 json.dump(layer_loss_save, f)
             print(f"  Layer-{layer_idx} saved ({len(layer_save)} experts)")
+
+    ################# QUANTIZE ALL: patch every expert, single measurement #################
+    elif metric == "quantize_all":
+
+        inps = torch.vstack([d.to(dev) for d in dataloader])  # [num_samples, seqlen]
+
+        # ── Patch ALL experts in ALL layers ───────────────────────────────
+        print("Patching all experts with quantized forwards...")
+        all_orig_forwards: list[tuple[nn.Linear, object]] = []
+        patched_count = 0
+        for layer_idx in range(num_layers):
+            experts = get_experts(layers[layer_idx], model_type)
+            n = len(experts) if max_experts < 0 else min(max_experts, len(experts))
+            for exp_id in range(n):
+                expert = experts[exp_id]
+                for block_name in block_names:
+                    linear: nn.Linear = getattr(expert, block_name, None)
+                    if linear is None or not hasattr(linear, "weight"):
+                        continue
+                    all_orig_forwards.append((linear, linear.forward))
+                    quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                    linear.forward = quant_fwd
+                    patched_count += 1
+        print(f"  Patched {patched_count} linears across {num_layers} layers")
+
+        # ── Compute reference (BF16) and quantized outputs ───────────────
+        # Use perplexity + KL divergence as aggregate metrics
+        print("Computing reference (BF16) outputs...")
+        # Unpatch temporarily for reference
+        for linear, orig_fwd in all_orig_forwards:
+            linear.forward = orig_fwd
+
+        ref_nll_sum = 0.0
+        ref_n_tokens = 0
+        kl_sum = 0.0
+
+        with torch.inference_mode():
+            for i in tqdm(range(num_samples), desc="Reference + quantized"):
+                input_ids = inps[i:i+1, :]  # [1, seqlen]
+
+                # Reference forward
+                ref_logits = model(input_ids).logits.float()  # [1, seqlen, vocab]
+                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+
+                # Reference perplexity (next-token prediction)
+                # logits[i] predicts token[i+1]
+                shift_lp = ref_lp[:, :-1, :]       # [1, seqlen-1, vocab]
+                shift_targets = input_ids[:, 1:]    # [1, seqlen-1]
+                nll = -shift_lp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
+                ref_nll_sum += nll.sum().item()
+                ref_n_tokens += nll.numel()
+
+                ref_p = ref_lp.exp()
+
+                # Repatch for quantized forward
+                for linear, _ in all_orig_forwards:
+                    # Find and apply the quant forward again
+                    pass
+                # More efficient: just re-apply all patches
+                del ref_logits  # free before quantized forward
+
+        # Actually, let's do it properly: reference pass, then quantized pass
+        # Reference pass (already unpatched above)
+        ref_nll_sum = 0.0
+        ref_n_tokens = 0
+        ref_log_probs_list = []  # store ONE at a time below
+
+        print("  Reference pass...")
+        with torch.inference_mode():
+            for i in tqdm(range(num_samples), desc="BF16 reference"):
+                ref_logits = model(inps[i:i+1, :]).logits.float()
+                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+                shift_lp = ref_lp[:, :-1, :]
+                shift_targets = inps[i:i+1, 1:]
+                nll = -shift_lp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
+                ref_nll_sum += nll.sum().item()
+                ref_n_tokens += nll.numel()
+                del ref_logits, ref_lp, shift_lp, nll
+
+        ref_ppl = torch.exp(torch.tensor(ref_nll_sum / max(ref_n_tokens, 1))).item()
+        print(f"  Reference perplexity: {ref_ppl:.4f}")
+
+        # Re-patch all
+        patch_idx = 0
+        for layer_idx in range(num_layers):
+            experts = get_experts(layers[layer_idx], model_type)
+            n = len(experts) if max_experts < 0 else min(max_experts, len(experts))
+            for exp_id in range(n):
+                expert = experts[exp_id]
+                for block_name in block_names:
+                    linear: nn.Linear = getattr(expert, block_name, None)
+                    if linear is None or not hasattr(linear, "weight"):
+                        continue
+                    quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                    linear.forward = quant_fwd
+
+        # Quantized pass
+        quant_nll_sum = 0.0
+        quant_n_tokens = 0
+        kl_sum = 0.0
+        kl_n_tokens = 0
+
+        print(f"  Quantized pass ({quant_mode}, all experts)...")
+        # Need reference log probs for KL — compute both in lockstep
+        # Unpatch → ref, repatch → quant, per sample
+        for linear, orig_fwd in all_orig_forwards:
+            linear.forward = orig_fwd  # unpatch all first
+
+        with torch.inference_mode():
+            for i in tqdm(range(num_samples), desc=f"All-{quant_mode}"):
+                input_ids = inps[i:i+1, :]
+
+                # Reference (unpatched)
+                ref_logits = model(input_ids).logits.float()
+                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+                del ref_logits
+
+                # Repatch all
+                patch_idx = 0
+                for layer_idx in range(num_layers):
+                    exps = get_experts(layers[layer_idx], model_type)
+                    n = len(exps) if max_experts < 0 else min(max_experts, len(exps))
+                    for exp_id in range(n):
+                        expert = exps[exp_id]
+                        for block_name in block_names:
+                            linear = getattr(expert, block_name, None)
+                            if linear is None or not hasattr(linear, "weight"):
+                                continue
+                            quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                            linear.forward = quant_fwd
+
+                # Quantized forward
+                q_logits = model(input_ids).logits.float()
+                q_lp = torch.nn.functional.log_softmax(q_logits, dim=-1)
+                del q_logits
+
+                # Quantized perplexity
+                shift_qlp = q_lp[:, :-1, :]
+                shift_targets = input_ids[:, 1:]
+                nll = -shift_qlp.gather(dim=-1, index=shift_targets.unsqueeze(-1)).squeeze(-1)
+                quant_nll_sum += nll.sum().item()
+                quant_n_tokens += nll.numel()
+
+                # KL(P_ref || Q_quant)
+                ref_p = ref_lp.exp()
+                kl_per_token = (ref_p * (ref_lp - q_lp)).sum(dim=-1)
+                kl_sum += kl_per_token.sum().item()
+                kl_n_tokens += kl_per_token.numel()
+
+                del ref_lp, ref_p, q_lp, kl_per_token, nll
+
+                # Unpatch all for next reference forward
+                for linear, orig_fwd in all_orig_forwards:
+                    linear.forward = orig_fwd
+
+        quant_ppl = torch.exp(torch.tensor(quant_nll_sum / max(quant_n_tokens, 1))).item()
+        mean_kl = kl_sum / max(kl_n_tokens, 1)
+
+        print(f"\n{'='*60}")
+        print(f"  FULL MODEL QUANTIZATION RESULTS ({quant_mode})")
+        print(f"{'='*60}")
+        print(f"  Reference perplexity (BF16):  {ref_ppl:.4f}")
+        print(f"  Quantized perplexity ({quant_mode:>5}):  {quant_ppl:.4f}")
+        print(f"  Perplexity increase:          {quant_ppl - ref_ppl:+.4f} ({(quant_ppl/ref_ppl - 1)*100:+.2f}%)")
+        print(f"  Mean KL divergence:           {mean_kl:.6f}")
+        print(f"  Samples: {num_samples}, Tokens: {kl_n_tokens}")
+        print(f"{'='*60}")
+
+        # Save results
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        results = {
+            "quant_mode": quant_mode,
+            "ref_perplexity": ref_ppl,
+            "quant_perplexity": quant_ppl,
+            "ppl_increase": quant_ppl - ref_ppl,
+            "ppl_increase_pct": (quant_ppl / ref_ppl - 1) * 100,
+            "mean_kl_divergence": mean_kl,
+            "num_samples": num_samples,
+            "num_tokens": kl_n_tokens,
+            "num_layers": num_layers,
+            "num_experts": num_experts,
+        }
+        with open(save_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"  Saved to {save_path}")
+
+        # Restore all
+        for linear, orig_fwd in all_orig_forwards:
+            linear.forward = orig_fwd
 
     else:
         raise ValueError(f"Unknown metric: {metric}")
@@ -951,14 +1158,16 @@ Quantization modes:
 Metrics:
   layer_out_norm  — L2 norm of single-layer output difference (fast, per-layer)
   model_out_norm  — L2 norm of full-model hidden state difference
-  kl_divergence   — KL(P_ref || Q_quant) on output logits (best for comparing methods)
+  kl_divergence   — KL(P_ref || Q_quant) on output logits (per-expert sensitivity)
+  quantize_all    — Quantize ALL experts, report perplexity + KL (whole-model baseline)
 
 Examples:
-  # NVFP4 (W4A4) sensitivity with KL divergence
-  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4 --metric kl_divergence
+  # Full-model baseline: quantize everything, get perplexity
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4 --metric quantize_all
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode fp8 --metric quantize_all
 
-  # FP8 (W8A8) sensitivity — joint, fast
-  python nf4_sensitivity.py --model_path /path/to/model --quant_mode fp8 --joint
+  # Per-expert KL sensitivity
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4 --metric kl_divergence
 
   # Quick test (1 layer, 4 experts)
   python nf4_sensitivity.py --model_path /path/to/model --max_layers 1 --max_experts 4
@@ -970,9 +1179,10 @@ Examples:
                         choices=["nvfp4", "fp8", "a16w4"],
                         help="Quantization mode (default: nvfp4)")
     parser.add_argument("--metric", type=str, default="layer_out_norm",
-                        choices=["layer_out_norm", "model_out_norm", "kl_divergence"],
+                        choices=["layer_out_norm", "model_out_norm", "kl_divergence", "quantize_all"],
                         help="Sensitivity metric (default: layer_out_norm). "
-                             "kl_divergence compares output logit distributions.")
+                             "kl_divergence compares output logit distributions. "
+                             "quantize_all patches ALL experts and reports perplexity + KL.")
     parser.add_argument("--nsamples", type=int, default=128,
                         help="Number of calibration samples (default: 128)")
     parser.add_argument("--seqlen", type=int, default=4096,
