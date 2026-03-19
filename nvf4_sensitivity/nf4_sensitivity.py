@@ -770,6 +770,150 @@ def get_model_quant_error(
                 json.dump(layer_loss_save, f)
             print(f"  Layer-{layer_idx} saved ({len(layer_save)} experts)")
 
+    ################# METRIC 3: KL DIVERGENCE ON LOGITS (kl_divergence) #################
+    elif metric == "kl_divergence":
+
+        inps = torch.vstack([d.to(dev) for d in dataloader])  # [num_samples, seqlen]
+        vocab_size = model.config.vocab_size
+
+        # ── Reference logits (full precision) ────────────────────────────
+        # Store log-softmax of reference logits (more numerically stable for KL)
+        # Shape: [num_samples, seqlen, vocab_size] — large, but needed for KL
+        # Process one sample at a time to avoid OOM on the logits tensor
+        print("Computing reference logits (BF16)...")
+        ref_log_probs = []
+
+        # ── Capture per-layer routing ────────────────────────────────────
+        per_layer_counts = {li: torch.zeros(num_experts, dtype=torch.long, device=dev)
+                            for li in range(num_layers)}
+
+        def _make_model_routing_hook(layer_idx):
+            counts = per_layer_counts[layer_idx]
+            def hook(module, input, output, _counts=counts):
+                indices = output[2].flatten()
+                _counts.index_add_(
+                    0, indices,
+                    torch.ones_like(indices, dtype=torch.long),
+                )
+            return hook
+
+        hook_handles = []
+        for li in range(num_layers):
+            if hasattr(layers[li].mlp, "gate"):
+                h = layers[li].mlp.gate.register_forward_hook(_make_model_routing_hook(li))
+                hook_handles.append(h)
+
+        with torch.inference_mode():
+            for i in tqdm(range(num_samples), desc="Reference logits"):
+                logits = model(inps[i:i+1, :]).logits  # [1, seqlen, vocab]
+                # Store log-softmax on CPU to save GPU memory
+                lp = torch.nn.functional.log_softmax(logits.float(), dim=-1).cpu()
+                ref_log_probs.append(lp.squeeze(0))    # [seqlen, vocab]
+
+        for h in hook_handles:
+            h.remove()
+
+        # Print routing stats
+        seqlen_model = inps.shape[-1]
+        total_tokens_model = num_samples * seqlen_model
+        for li in range(num_layers):
+            counts = per_layer_counts[li]
+            total = counts.sum().item()
+            if total > 0:
+                mean_c = counts.float().mean().item()
+                std_c = counts.float().std().item()
+                cv = std_c / mean_c if mean_c > 0 else 0
+                print(f"  Layer {li}: {total_tokens_model} tokens × top-{total // total_tokens_model} "
+                      f"= {total} total assignments over {num_samples} samples")
+                print(f"    per-expert tokens: min={counts.min().item()} "
+                      f"max={counts.max().item()} "
+                      f"mean={mean_c:.1f} std={std_c:.1f} CV={cv:.3f}")
+
+        # ── Per-expert KL divergence ─────────────────────────────────────
+        for layer_idx in tqdm(range(num_layers), desc="Layers"):
+            experts = get_experts(layers[layer_idx], model_type)
+            num_layer_experts = len(experts) if max_experts < 0 else min(max_experts, len(experts))
+
+            for exp_id in tqdm(range(num_layer_experts), leave=False, desc="Quantizing Expert"):
+                # ── Resume: skip if already exists ───────────────────────
+                if resume and layer_idx in layer_loss_save:
+                    existing = layer_loss_save[layer_idx]
+                    if str(exp_id) in existing or exp_id in existing:
+                        entry = existing.get(str(exp_id), existing.get(exp_id))
+                        cached_err = entry["error"] if isinstance(entry, dict) else entry
+                        layer_loss[layer_idx].append(cached_err)
+                        exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                        print(f"  L{layer_idx}-E{exp_id} SKIP (resumed) [{exp_tokens} tokens]: {cached_err}")
+                        continue
+
+                expert = experts[exp_id]
+
+                if joint:
+                    orig_forwards = {}
+                    for block_name in block_names:
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            continue
+                        orig_forwards[block_name] = linear.forward
+                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                        linear.forward = quant_fwd
+                else:
+                    # For per-linear KL, patch all linears (same as joint)
+                    # because KL is computed at the model output, not per-linear
+                    orig_forwards = {}
+                    for block_name in block_names:
+                        linear: nn.Linear = getattr(expert, block_name, None)
+                        if linear is None or not hasattr(linear, "weight"):
+                            continue
+                        orig_forwards[block_name] = linear.forward
+                        quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                        linear.forward = quant_fwd
+
+                # Compute KL divergence: KL(P_ref || Q_quant)
+                kl_sum = 0.0
+                n_tokens = 0
+                with torch.inference_mode():
+                    for i in range(num_samples):
+                        q_logits = model(inps[i:i+1, :]).logits  # [1, seqlen, vocab]
+                        q_log_probs = torch.nn.functional.log_softmax(
+                            q_logits.float(), dim=-1,
+                        ).squeeze(0).cpu()  # [seqlen, vocab]
+
+                        # KL(P || Q) = sum(P * (log P - log Q))
+                        p_log = ref_log_probs[i]       # [seqlen, vocab]
+                        p = p_log.exp()
+                        kl_per_token = (p * (p_log - q_log_probs)).sum(dim=-1)  # [seqlen]
+                        kl_sum += kl_per_token.sum().item()
+                        n_tokens += kl_per_token.numel()
+
+                mean_kl = kl_sum / max(n_tokens, 1)
+
+                # Restore
+                for block_name, orig_fwd in orig_forwards.items():
+                    getattr(expert, block_name).forward = orig_fwd
+
+                expert_err = [mean_kl]
+                layer_loss[layer_idx].append(expert_err)
+                exp_tokens = per_layer_counts[layer_idx][exp_id].item() if exp_id < len(per_layer_counts[layer_idx]) else 0
+                print(f"  L{layer_idx}-E{exp_id} {quant_mode} (KL) "
+                      f"[{exp_tokens} tokens]: mean_KL={mean_kl:.6f}")
+
+            # Serialization
+            counts = per_layer_counts[layer_idx]
+            mean_tokens = counts.float().mean().item() if counts.sum().item() > 0 else 1.0
+            layer_save = {}
+            for e in range(len(layer_loss[layer_idx])):
+                tok = counts[e].item() if e < len(counts) else 0
+                layer_save[e] = {
+                    "error": layer_loss[layer_idx][e],
+                    "tokens": tok,
+                    "token_ratio": round(tok / mean_tokens, 4) if mean_tokens > 0 else 0.0,
+                }
+            layer_loss_save[layer_idx] = layer_save
+            with open(save_path, "w") as f:
+                json.dump(layer_loss_save, f)
+            print(f"  Layer-{layer_idx} saved ({len(layer_save)} experts)")
+
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -801,21 +945,23 @@ if __name__ == "__main__":
         epilog="""
 Quantization modes:
   nvfp4   W4A4  — real FP4 GEMM via FlashInfer mm_fp4 (Blackwell GPU required)
-  fp8     W8A8  — fake-quantize weight+activation to FP8 E4M3, BF16 matmul
+  fp8     W8A8  — real FP8 GEMM via FlashInfer gemm_fp8_nt_groupwise
   a16w4   W4A16 — fake-quantize weight to FP4 E2M1 (per-block), BF16 activation
 
+Metrics:
+  layer_out_norm  — L2 norm of single-layer output difference (fast, per-layer)
+  model_out_norm  — L2 norm of full-model hidden state difference
+  kl_divergence   — KL(P_ref || Q_quant) on output logits (best for comparing methods)
+
 Examples:
-  # NVFP4 (W4A4) sensitivity — real FP4 compute
-  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4
+  # NVFP4 (W4A4) sensitivity with KL divergence
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode nvfp4 --metric kl_divergence
 
-  # FP8 (W8A8) sensitivity
-  python nf4_sensitivity.py --model_path /path/to/model --quant_mode fp8
+  # FP8 (W8A8) sensitivity — joint, fast
+  python nf4_sensitivity.py --model_path /path/to/model --quant_mode fp8 --joint
 
-  # Weight-only FP4 (W4A16) sensitivity
-  python nf4_sensitivity.py --model_path /path/to/model --quant_mode a16w4
-
-  # Quick test (1 layer)
-  python nf4_sensitivity.py --model_path /path/to/model --max_layers 1
+  # Quick test (1 layer, 4 experts)
+  python nf4_sensitivity.py --model_path /path/to/model --max_layers 1 --max_experts 4
         """,
     )
     parser.add_argument("--model_path", type=str, required=True,
@@ -824,8 +970,9 @@ Examples:
                         choices=["nvfp4", "fp8", "a16w4"],
                         help="Quantization mode (default: nvfp4)")
     parser.add_argument("--metric", type=str, default="layer_out_norm",
-                        choices=["layer_out_norm", "model_out_norm"],
-                        help="Sensitivity metric (default: layer_out_norm)")
+                        choices=["layer_out_norm", "model_out_norm", "kl_divergence"],
+                        help="Sensitivity metric (default: layer_out_norm). "
+                             "kl_divergence compares output logit distributions.")
     parser.add_argument("--nsamples", type=int, default=128,
                         help="Number of calibration samples (default: 128)")
     parser.add_argument("--seqlen", type=int, default=4096,
