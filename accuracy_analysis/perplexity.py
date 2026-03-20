@@ -137,7 +137,7 @@ def run_experiment(
     print(f"Loading model: {model_name}")
     print(f"Mode: {mode} (max_length={max_length}, stride={stride})")
     model = MultiPrecisionMoEModel(
-        model_name=model_name,
+        model_path=model_name,
         quant_modes=quant_modes,
         backend=backend,
     )
@@ -206,7 +206,8 @@ def run_experiment(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Perplexity experiment with mixed-precision MoE")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-30B-A3B")
+    parser.add_argument("--model", type=str, default="./models/Qwen3-30B-A3B",
+                        help="Local model path or HuggingFace repo ID")
     parser.add_argument("--mode", type=str, default="memory_bound",
                         choices=["memory_bound", "compute_bound"],
                         help="memory_bound: seq_len=512, compute_bound: seq_len=8192")

@@ -1,5 +1,4 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from pathlib import Path
 import torch
 import torch.nn as nn
 import logging
@@ -33,7 +32,7 @@ def select_experts_to_quantize(
         return []
 
     if criteria == QuantizationCriteria.RANDOM:
-        perm = torch.randperm(len(unique_experts))[:num_to_quantize]
+        perm = torch.randperm(len(unique_experts), device=topk_indices.device)[:num_to_quantize]
         experts_to_quantize = {unique_experts[i] for i in perm.tolist()}
 
     elif criteria in [QuantizationCriteria.LOWEST_WEIGHT_SUM, QuantizationCriteria.HIGHEST_WEIGHT_SUM]:
@@ -74,25 +73,25 @@ def select_experts_to_quantize(
 class MultiPrecisionMoEModel:
     def __init__(
             self,
-            model_name="Qwen/Qwen3-30B-A3B",
-            cache_dir="/models/",
+            model_path="Qwen/Qwen3-30B-A3B",
             quant_modes=["nvfp4"],
             backend="cudnn",
         ):
-        cache_dir = Path(cache_dir) / model_name.replace("/", "_")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
+        """
+        Args:
+            model_path: local directory (e.g. "./models/Qwen3-30B-A3B") or
+                        HuggingFace repo ID (e.g. "Qwen/Qwen3-30B-A3B").
+            quant_modes: list of quant modes to pre-create ("nvfp4", "fp8", "a16w4").
+            backend: FlashInfer backend for nvfp4 ("cudnn" or "cutlass").
+        """
         logger.info("Loading tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, cache_dir=cache_dir
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
         logger.info("Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            model_path,
             torch_dtype="auto",
             device_map="auto",
-            cache_dir=cache_dir
         )
         logger.info("Model loaded.")
 
@@ -161,20 +160,28 @@ class MultiPrecisionMoEModel:
             criteria=QuantizationCriteria.RANDOM,
             custom_fn=None,
         ):
+        """Monkey-patch selected experts per-batch via pre/post hooks.
+
+        Pre-hook: run gate → select experts → patch their linear forwards.
+        Model forward: runs normally, patched experts use quantized GEMM.
+        Post-hook: restore original forwards.
+
+        Each expert runs exactly once (no delta recomputation).
+        """
         moe_layer = self.model.model.layers[layer_id].mlp
         num_experts_per_tok = self.model.config.num_experts_per_tok
         num_experts = self.model.config.num_experts
+        block_names = self._expert_config["block_names"]
+        labels = self._expert_config["labels"]
 
-        def moe_hook(module, input, output):
-            if isinstance(output, tuple):
-                hidden_output, rest = output[0], output[1:]
-            else:
-                hidden_output, rest = output, None
+        # Per-call state shared between pre-hook and post-hook
+        patched_state = []  # [(proj, original_forward), ...]
 
+        def pre_hook(module, input):
             hidden_states = input[0]
-            batch_size, seq_len, hidden_dim = hidden_states.shape
+            hidden_dim = hidden_states.shape[-1]
 
-            # Re-derive routing decisions
+            # Run gate to get routing decisions
             gate_output = module.gate(hidden_states.view(-1, hidden_dim))
             if isinstance(gate_output, tuple):
                 router_logits = gate_output[0]
@@ -195,56 +202,28 @@ class MultiPrecisionMoEModel:
             )
 
             if not experts_to_quantize:
-                return output
+                return
 
-            # Flatten for vectorized processing
-            flat_hidden = hidden_states.view(-1, hidden_dim)
-            flat_topk_indices = topk_indices.view(-1, num_experts_per_tok)
-            flat_topk_weights = topk_weights.view(-1, num_experts_per_tok)
-
-            # Accumulate corrections: delta = quant_out - original_out
-            delta = torch.zeros_like(flat_hidden)
-
+            # Patch selected experts' linear forwards
             for expert_id in experts_to_quantize:
-                mask = (flat_topk_indices == expert_id)
+                fwds = self._quant_forwards[quant_mode][(layer_id, expert_id)]
+                expert = module.experts[expert_id]
+                for block_name, label in zip(block_names, labels):
+                    proj = getattr(expert, block_name)
+                    patched_state.append((proj, proj.forward))
+                    proj.forward = fwds[label]
 
-                if not mask.any():
-                    continue
+        def post_hook(module, input, output):
+            # Restore all patched forwards
+            for proj, orig_fwd in patched_state:
+                proj.forward = orig_fwd
+            patched_state.clear()
+            return output
 
-                token_indices, topk_positions = torch.where(mask)
-                weights_for_expert = flat_topk_weights[token_indices, topk_positions]
-
-                unique_token_indices, inverse_indices = torch.unique(
-                    token_indices, return_inverse=True
-                )
-                expert_hidden = flat_hidden[unique_token_indices]
-
-                # Original expert forward
-                original_expert = module.experts[expert_id]
-                original_out = original_expert(expert_hidden)
-
-                # Quantized expert forward (real quantized GEMM)
-                quant_out = self._forward_quantized_expert(
-                    layer_id, expert_id, quant_mode, expert_hidden
-                )
-
-                token_delta = quant_out - original_out
-                weighted_deltas = weights_for_expert.unsqueeze(1) * token_delta[inverse_indices]
-                delta.index_add_(0, token_indices, weighted_deltas)
-
-            flat_output = hidden_output.view(-1, hidden_dim)
-            modified_flat = flat_output + delta
-            modified_output = modified_flat.view(batch_size, seq_len, hidden_dim)
-
-            if rest is not None:
-                return (modified_output,) + rest
-            else:
-                return modified_output
-
-        handle = moe_layer.register_forward_hook(moe_hook)
-        self._hook_handles.append(handle)
-        logger.debug("Registered layer hook for layer %d, mode %s.", layer_id, quant_mode)
-        return handle
+        pre_handle = moe_layer.register_forward_pre_hook(pre_hook)
+        post_handle = moe_layer.register_forward_hook(post_hook)
+        self._hook_handles.extend([pre_handle, post_handle])
+        logger.debug("Registered layer hooks for layer %d, mode %s.", layer_id, quant_mode)
 
     def register_expert_override(self, layer_id, expert_id, quant_mode):
         """Monkey-patch an individual expert to use quantized forward."""
@@ -311,7 +290,7 @@ class MultiPrecisionMoEModel:
 
 if __name__ == "__main__":
     model = MultiPrecisionMoEModel(
-        model_name="Qwen/Qwen3-30B-A3B",
+        model_path="./models/Qwen3-30B-A3B",
         quant_modes=["nvfp4"],
     )
 

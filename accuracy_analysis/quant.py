@@ -55,13 +55,12 @@ def make_nvfp4_forward(
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
 
-        # Quantize weight
+        # Quantize weight — mm_fp4 uses NT convention (computes A @ B^T),
+        # so pass w_fp4 as-is (shape [N, K_packed]), no transpose needed.
         w_global_sf = compute_nvfp4_global_scale(w)
         w_fp4, w_sf = nvfp4_quantize(
             w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
-        w_fp4_t = w_fp4.T.contiguous()
-        w_sf_t = w_sf.T.contiguous()
 
         # Quantize activation
         x_global_sf = compute_nvfp4_global_scale(x)
@@ -76,7 +75,7 @@ def make_nvfp4_forward(
 
         try:
             out = mm_fp4(
-                x_fp4, w_fp4_t, x_sf, w_sf_t, alpha,
+                x_fp4, w_fp4, x_sf, w_sf, alpha,
                 out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
                 backend=effective_backend[0], use_nvfp4=True,
             )
@@ -84,7 +83,7 @@ def make_nvfp4_forward(
             if effective_backend[0] != "cutlass":
                 effective_backend[0] = "cutlass"
             out = mm_fp4(
-                x_fp4, w_fp4_t, x_sf, w_sf_t, alpha,
+                x_fp4, w_fp4, x_sf, w_sf, alpha,
                 out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
                 backend="cutlass", use_nvfp4=True,
             )
