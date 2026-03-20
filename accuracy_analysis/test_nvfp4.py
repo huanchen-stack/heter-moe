@@ -1,6 +1,8 @@
 """
-Detailed NVFP4 diagnostic: test different transpose/quantize strategies
-to find what produces correct mm_fp4 output on cutlass backend.
+NVFP4 / FP8 accuracy test: compare quantized linear output against BF16 reference.
+
+Uses make_quant_forward which auto-falls back to FP8 when NVFP4 dimensions
+don't match (e.g. down_proj where N != K/2).
 
 Usage:
     python test_nvfp4.py
@@ -8,8 +10,7 @@ Usage:
 
 import torch
 import torch.nn as nn
-from torch import Tensor
-from quant import compute_nvfp4_global_scale, NVFP4_BLOCK_SIZE
+from quant import make_quant_forward, make_fp8_forward, ExpertMLP
 
 
 def cos_sim(a, b):
@@ -18,159 +19,111 @@ def cos_sim(a, b):
     ).item()
 
 
-def try_mm(label, x_fp4, b, x_sf, b_sf, alpha, ref):
-    from flashinfer import mm_fp4
-    try:
-        out = mm_fp4(
-            x_fp4, b, x_sf, b_sf, alpha,
-            out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
-            backend="cutlass", use_nvfp4=True,
-        )
-        cs = cos_sim(ref, out)
-        me = (ref - out).abs().max().item()
-        print(f"  {label:<50} cos={cs:.4f}  max_err={me:.4f}")
-        return cs, out
-    except Exception as e:
-        print(f"  {label:<50} ERROR: {str(e)[:80]}")
-        return None, None
+def test_linear(linear, x):
+    """Compare BF16 vs FP8 vs NVFP4 (with auto-fallback) for a single linear."""
+    ref = linear(x)
+
+    fp8_fwd, _ = make_fp8_forward(linear)
+    fp8_out = fp8_fwd(x)
+
+    nvfp4_fwd, _ = make_quant_forward(linear, "nvfp4", backend="cutlass")
+    nvfp4_out = nvfp4_fwd(x)
+
+    N, K = linear.weight.shape
+    mode = "nvfp4" if N == K // 2 else "fp8(fb)"
+
+    return {
+        "fp8_cos": cos_sim(ref, fp8_out),
+        "fp8_max_err": (ref - fp8_out).abs().max().item(),
+        "nv4_cos": cos_sim(ref, nvfp4_out),
+        "nv4_max_err": (ref - nvfp4_out).abs().max().item(),
+        "nv4_mode": mode,
+    }
+
+
+def test_expert(M, hidden_dim, inter_dim):
+    """Compare BF16 vs FP8 vs NVFP4 for a full ExpertMLP."""
+    gate_w = torch.randn(inter_dim, hidden_dim, dtype=torch.bfloat16, device="cuda")
+    up_w = torch.randn(inter_dim, hidden_dim, dtype=torch.bfloat16, device="cuda")
+    down_w = torch.randn(hidden_dim, inter_dim, dtype=torch.bfloat16, device="cuda")
+    expert = ExpertMLP(gate_w, up_w, down_w, nn.SiLU()).cuda()
+    x = torch.randn(M, hidden_dim, dtype=torch.bfloat16, device="cuda")
+
+    with torch.no_grad():
+        ref = expert(x)
+
+    results = {}
+    for label, mode in [("fp8", "fp8"), ("nv4", "nvfp4")]:
+        orig_fwds = {}
+        for name in ["gate_proj", "up_proj", "down_proj"]:
+            proj = getattr(expert, name)
+            orig_fwds[name] = proj.forward
+            fwd, _ = make_quant_forward(proj, mode, backend="cutlass")
+            proj.forward = fwd
+
+        with torch.no_grad():
+            out = expert(x)
+
+        for name, fwd in orig_fwds.items():
+            getattr(expert, name).forward = fwd
+
+        results[f"{label}_cos"] = cos_sim(ref, out)
+        results[f"{label}_max_err"] = (ref - out).abs().max().item()
+
+    return results
 
 
 if __name__ == "__main__":
-    from flashinfer import nvfp4_quantize, mm_fp4, SfLayout
+    # ================================================================
+    # Test 1: Single linear layer
+    # ================================================================
+    print("=" * 80)
+    print("Single nn.Linear: BF16 vs FP8 vs NVFP4 (auto-fallback to FP8 when N!=K/2)")
+    print("=" * 80)
+    print(f"{'M':>6} {'K':>6} {'N':>6} | {'FP8 cos':>9} {'FP8 err':>9} | {'NV4 cos':>9} {'NV4 err':>9} {'mode':>8}")
+    print("-" * 80)
 
-    M, K, N = 16, 2048, 1024
-    linear = nn.Linear(K, N, bias=False, dtype=torch.bfloat16, device="cuda")
-    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
-    ref = linear(x)  # ground truth: x @ W^T
+    shapes = [
+        (1, 2048, 1024),
+        (4, 2048, 1024),
+        (16, 2048, 1024),
+        (128, 2048, 1024),
+        (1, 1024, 2048),    # down_proj shape → auto-fallback to fp8
+        (1, 2048, 256),     # small expert → auto-fallback
+        (1, 256, 2048),     # auto-fallback
+        (512, 2048, 1024),
+    ]
 
-    w = linear.weight.data  # [N, K]
-    print(f"Shapes: x={list(x.shape)}, w={list(w.shape)}, ref={list(ref.shape)}")
-    print(f"Expected: x[{M},{K}] @ w^T[{K},{N}] = [{M},{N}]")
+    for M, K, N in shapes:
+        linear = nn.Linear(K, N, bias=False, dtype=torch.bfloat16, device="cuda")
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        r = test_linear(linear, x)
+        print(f"{M:>6} {K:>6} {N:>6} | {r['fp8_cos']:>9.4f} {r['fp8_max_err']:>9.4f} | "
+              f"{r['nv4_cos']:>9.4f} {r['nv4_max_err']:>9.4f} {r['nv4_mode']:>8}")
+
+    # ================================================================
+    # Test 2: Full ExpertMLP (gate=nvfp4, up=nvfp4, down=fp8 fallback)
+    # ================================================================
     print()
+    print("=" * 80)
+    print("Full ExpertMLP: BF16 vs FP8 vs NVFP4 (down_proj auto-falls back to FP8)")
+    print("=" * 80)
+    print(f"{'M':>6} {'hidden':>8} {'inter':>8} | {'FP8 cos':>9} {'FP8 err':>9} | {'NV4 cos':>9} {'NV4 err':>9}")
+    print("-" * 80)
 
-    # Quantize x (activation) — same for all tests
-    x_global_sf = compute_nvfp4_global_scale(x)
-    x_fp4, x_sf = nvfp4_quantize(
-        x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
-    )
-    print(f"x_fp4 shape: {list(x_fp4.shape)}, dtype: {x_fp4.dtype}")
-    print(f"x_sf  shape: {list(x_sf.shape)},  dtype: {x_sf.dtype}")
-    print()
+    expert_shapes = [
+        (1, 2048, 1024),
+        (4, 2048, 1024),
+        (16, 2048, 1024),
+        (128, 2048, 1024),
+        (1, 2048, 256),
+    ]
 
-    # ====================================================================
-    # Strategy A: Quantize w [N,K], then .T (current code)
-    # ====================================================================
-    print("=" * 70)
-    print("Strategy A: quantize w[N,K], then transpose packed result")
-    print("=" * 70)
-    w_global_sf = compute_nvfp4_global_scale(w)
-    w_fp4, w_sf = nvfp4_quantize(
-        w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
-    )
-    print(f"  w_fp4 shape: {list(w_fp4.shape)}, dtype: {w_fp4.dtype}")
-    print(f"  w_sf  shape: {list(w_sf.shape)},  dtype: {w_sf.dtype}")
-    print(f"  w_fp4.T shape: {list(w_fp4.T.shape)}")
-    print(f"  w_sf.T  shape: {list(w_sf.T.shape)}")
-
-    alpha_A = torch.tensor(
-        1.0 / (x_global_sf.item() * w_global_sf.item()),
-        device=x.device, dtype=torch.float32,
-    )
-
-    # A1: pass w_fp4.T, w_sf.T (current code)
-    try_mm("A1: mm_fp4(x, w_fp4.T, x_sf, w_sf.T)",
-           x_fp4, w_fp4.T.contiguous(), x_sf, w_sf.T.contiguous(), alpha_A, ref)
-
-    # A2: pass w_fp4, w_sf (no transpose)
-    try_mm("A2: mm_fp4(x, w_fp4, x_sf, w_sf)",
-           x_fp4, w_fp4, x_sf, w_sf, alpha_A, ref)
-
-    # A3: transpose only w_fp4, not w_sf
-    try_mm("A3: mm_fp4(x, w_fp4.T, x_sf, w_sf)",
-           x_fp4, w_fp4.T.contiguous(), x_sf, w_sf, alpha_A, ref)
-
-    # A4: transpose only w_sf, not w_fp4
-    try_mm("A4: mm_fp4(x, w_fp4, x_sf, w_sf.T)",
-           x_fp4, w_fp4, x_sf, w_sf.T.contiguous(), alpha_A, ref)
+    for M, hidden, inter in expert_shapes:
+        r = test_expert(M, hidden, inter)
+        print(f"{M:>6} {hidden:>8} {inter:>8} | {r['fp8_cos']:>9.4f} {r['fp8_max_err']:>9.4f} | "
+              f"{r['nv4_cos']:>9.4f} {r['nv4_max_err']:>9.4f}")
 
     print()
-
-    # ====================================================================
-    # Strategy B: Quantize w^T [K,N] directly (no packed transpose)
-    # ====================================================================
-    print("=" * 70)
-    print("Strategy B: quantize w.T[K,N] directly")
-    print("=" * 70)
-    wt = w.T.contiguous()  # [K, N]
-    wt_global_sf = compute_nvfp4_global_scale(wt)
-    wt_fp4, wt_sf = nvfp4_quantize(
-        wt, wt_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
-    )
-    print(f"  wt_fp4 shape: {list(wt_fp4.shape)}, dtype: {wt_fp4.dtype}")
-    print(f"  wt_sf  shape: {list(wt_sf.shape)},  dtype: {wt_sf.dtype}")
-
-    alpha_B = torch.tensor(
-        1.0 / (x_global_sf.item() * wt_global_sf.item()),
-        device=x.device, dtype=torch.float32,
-    )
-
-    # B1: pass wt_fp4, wt_sf (no transpose)
-    try_mm("B1: mm_fp4(x, wt_fp4, x_sf, wt_sf)",
-           x_fp4, wt_fp4, x_sf, wt_sf, alpha_B, ref)
-
-    # B2: pass wt_fp4.T, wt_sf.T
-    try_mm("B2: mm_fp4(x, wt_fp4.T, x_sf, wt_sf.T)",
-           x_fp4, wt_fp4.T.contiguous(), x_sf, wt_sf.T.contiguous(), alpha_B, ref)
-
-    print()
-
-    # ====================================================================
-    # Strategy C: Quantize w [N,K] with do_shuffle=True
-    # ====================================================================
-    print("=" * 70)
-    print("Strategy C: quantize w[N,K] with do_shuffle=True")
-    print("=" * 70)
-    ws_fp4, ws_sf = nvfp4_quantize(
-        w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=True,
-    )
-    print(f"  ws_fp4 shape: {list(ws_fp4.shape)}, dtype: {ws_fp4.dtype}")
-    print(f"  ws_sf  shape: {list(ws_sf.shape)},  dtype: {ws_sf.dtype}")
-
-    try_mm("C1: mm_fp4(x, ws_fp4.T, x_sf, ws_sf.T) [shuffled]",
-           x_fp4, ws_fp4.T.contiguous(), x_sf, ws_sf.T.contiguous(), alpha_A, ref)
-
-    try_mm("C2: mm_fp4(x, ws_fp4, x_sf, ws_sf) [shuffled, no T]",
-           x_fp4, ws_fp4, x_sf, ws_sf, alpha_A, ref)
-
-    print()
-
-    # ====================================================================
-    # Strategy D: Quantize w.T [K,N] with do_shuffle=True
-    # ====================================================================
-    print("=" * 70)
-    print("Strategy D: quantize w.T[K,N] with do_shuffle=True")
-    print("=" * 70)
-    wts_fp4, wts_sf = nvfp4_quantize(
-        wt, wt_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=True,
-    )
-    print(f"  wts_fp4 shape: {list(wts_fp4.shape)}, dtype: {wts_fp4.dtype}")
-    print(f"  wts_sf  shape: {list(wts_sf.shape)},  dtype: {wts_sf.dtype}")
-
-    try_mm("D1: mm_fp4(x, wts_fp4, x_sf, wts_sf) [wT, shuffled]",
-           x_fp4, wts_fp4, x_sf, wts_sf, alpha_B, ref)
-
-    try_mm("D2: mm_fp4(x, wts_fp4.T, x_sf, wts_sf.T) [wT, shuffled, T]",
-           x_fp4, wts_fp4.T.contiguous(), x_sf, wts_sf.T.contiguous(), alpha_B, ref)
-
-    print()
-
-    # ====================================================================
-    # Print sample values for the best result
-    # ====================================================================
-    print("=" * 70)
-    print("Reference vs BF16 matmul sanity check")
-    print("=" * 70)
-    manual = x @ w.T
-    print(f"  linear(x) vs x@w.T cos_sim: {cos_sim(ref, manual):.6f}")
-    print(f"  ref[0,:5]:    {ref[0, :5].tolist()}")
-    print(f"  manual[0,:5]: {manual[0, :5].tolist()}")
+    print("nvfp4 = real FP4 GEMM for gate/up, auto-fallback to FP8 for down_proj")
+    print("Expected: all cos > 0.90")

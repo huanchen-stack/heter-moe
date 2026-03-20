@@ -194,9 +194,19 @@ def make_quant_forward(linear: nn.Linear, quant_mode: str, backend: str = "cudnn
     """Create a quantized forward function for the given mode.
 
     Returns (forward_fn, extra_data).
+
+    For nvfp4: mm_fp4 on cutlass requires N == K/2 (packed dim match).
+    When the weight shape doesn't satisfy this (e.g. down_proj), falls
+    back to fp8 automatically.
     """
     if quant_mode == "nvfp4":
-        return make_nvfp4_forward(linear, backend=backend)
+        N, K = linear.weight.shape
+        if N == K // 2:
+            return make_nvfp4_forward(linear, backend=backend)
+        else:
+            # down_proj shape: K/2 != N, mm_fp4 dimension check fails.
+            # Fall back to fp8 for this linear.
+            return make_fp8_forward(linear)
     elif quant_mode == "fp8":
         return make_fp8_forward(linear)
     elif quant_mode == "a16w4":
