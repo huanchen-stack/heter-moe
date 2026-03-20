@@ -4,3 +4,4 @@ TensorRT-LLM
 *__pycache__*
 *egg-info*
 *models*
+*.omc*
