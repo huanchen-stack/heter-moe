@@ -464,24 +464,66 @@ def get_model_quant_error(
             for lin, ofwd, _ in per_layer_forwards[li]:
                 lin.forward = ofwd
 
-        # ── Determine which layers still need computation (resume) ─────
+        # ── Determine resume state ─────────────────────────────────────
+        # Save format per layer:
+        #   {"error": float, "num_samples": N, "completed_samples": M}
+        # completed_samples < num_samples means partial; == num_samples means done.
+        # Legacy entries without completed_samples are treated as done.
         layers_to_compute = list(range(num_layers))
-        if resume:
-            layers_to_compute = [
-                li for li in layers_to_compute
-                if li not in layer_loss_save and str(li) not in layer_loss_save
-            ]
-            n_skip = num_layers - len(layers_to_compute)
-            if n_skip:
-                print(f"  Resume: skipping {n_skip} already-computed layers")
-
-        # ── Error accumulators ─────────────────────────────────────────
+        start_sample = 0
         norm_accum = {li: 0.0 for li in layers_to_compute}
 
+        if resume:
+            done_layers = set()
+            partial_start = None
+            for li in layers_to_compute:
+                entry = layer_loss_save.get(li, layer_loss_save.get(str(li)))
+                if entry is None:
+                    continue
+                if not isinstance(entry, dict):
+                    done_layers.add(li)
+                    continue
+                cs = entry.get("completed_samples")
+                ns = entry.get("num_samples")
+                if cs is not None and ns == num_samples and cs < num_samples:
+                    # Partial — restore accumulator
+                    norm_accum[li] = entry["error"]
+                    if partial_start is None:
+                        partial_start = cs
+                    else:
+                        assert partial_start == cs, (
+                            f"Inconsistent completed_samples: layer {li} has {cs}, expected {partial_start}"
+                        )
+                else:
+                    done_layers.add(li)
+
+            if done_layers:
+                layers_to_compute = [li for li in layers_to_compute if li not in done_layers]
+                norm_accum = {li: norm_accum[li] for li in layers_to_compute}
+                print(f"  Resume: skipping {len(done_layers)} fully-computed layers")
+            if partial_start is not None:
+                start_sample = partial_start
+                print(f"  Resume: continuing from sample {start_sample}/{num_samples}")
+
+        # ── Save helper ────────────────────────────────────────────────
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+
+        def _save_checkpoint(completed_samples):
+            for li in layers_to_compute:
+                layer_loss_save[li] = {
+                    "error": norm_accum[li],
+                    "num_samples": num_samples,
+                    "completed_samples": completed_samples,
+                }
+            with open(save_path, "w") as f:
+                json.dump(layer_loss_save, f, indent=2)
+
         # ── Lockstep: 1 ref + N_layers quant forwards per sample ──────
-        print(f"  Lockstep BF16 vs {quant_mode} ({num_samples} samples × {len(layers_to_compute)} layers)...")
+        remaining = num_samples - start_sample
+        print(f"  Lockstep BF16 vs {quant_mode} ({remaining} remaining samples × {len(layers_to_compute)} layers)...")
         with torch.inference_mode():
-            for i in tqdm(range(num_samples), desc=f"BF16 vs {quant_mode}"):
+            for i in tqdm(range(start_sample, num_samples), desc=f"BF16 vs {quant_mode}",
+                          initial=start_sample, total=num_samples):
                 input_ids = inps[i:i+1, :]
 
                 # Reference forward (fully unpatched) → last hidden state
@@ -498,25 +540,19 @@ def get_model_quant_error(
 
                 del ref_hidden
 
-        # ── Finalize and save ──────────────────────────────────────────
+                # Checkpoint after each sample
+                _save_checkpoint(i + 1)
+
+        # ── Finalize and print ─────────────────────────────────────────
         print(f"\n{'='*60}")
         print(f"  LAYERWISE MODEL OUTPUT NORM ({quant_mode})")
         print(f"{'='*60}")
         for layer_idx in range(num_layers):
-            if layer_idx in norm_accum:
-                err = norm_accum[layer_idx]
-                layer_loss_save[layer_idx] = {
-                    "error": err,
-                    "num_samples": num_samples,
-                }
-            else:
-                entry = layer_loss_save.get(layer_idx, layer_loss_save.get(str(layer_idx)))
-                err = entry["error"] if isinstance(entry, dict) else entry
+            entry = layer_loss_save.get(layer_idx, layer_loss_save.get(str(layer_idx)))
+            if entry is None:
+                continue
+            err = entry["error"] if isinstance(entry, dict) else entry
             print(f"  Layer {layer_idx:3d}: L2_error = {err:.4f}")
-
-        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
-        with open(save_path, "w") as f:
-            json.dump(layer_loss_save, f, indent=2)
         print(f"  Saved to {save_path}")
 
     ################# QUANTIZE ALL: patch every expert, single measurement #################
