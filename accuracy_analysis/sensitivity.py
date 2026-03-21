@@ -555,6 +555,178 @@ def get_model_quant_error(
             print(f"  Layer {layer_idx:3d}: L2_error = {err:.4f}")
         print(f"  Saved to {save_path}")
 
+    ################# METRIC 4: LAYERWISE PERPLEXITY (layerwise_perplexity) #################
+    elif metric == "layerwise_perplexity":
+        # For each layer i: quantize ONLY layer i (all experts), run full model
+        # forward through the LM head, measure perplexity increase vs BF16.
+        #
+        # Unlike layerwise_model_out_norm (L2 on hidden states), perplexity
+        # captures actual impact on predictions — the softmax is very sensitive
+        # to last-layer perturbations even when L2 change is small.
+        # Expected result: U-shape (early + final layers matter most).
+        #
+        # Cost: N_samples × (1 + N_layers) full-model forwards (same as
+        # layerwise_model_out_norm but through the LM head).
+
+        inps = torch.vstack([d.to(dev) for d in dataloader])  # [num_samples, seqlen]
+
+        # ── Pre-compute quantized forwards for all layers ──────────────
+        print("Pre-computing quantized forwards for all layers...")
+        per_layer_forwards: dict[int, list[tuple]] = {}
+        for layer_idx in range(num_layers):
+            experts = get_experts(layers[layer_idx], model_type)
+            n = len(experts) if max_experts < 0 else min(max_experts, len(experts))
+            layer_fwds = []
+            for exp_id in range(n):
+                expert = experts[exp_id]
+                for block_name in block_names:
+                    linear: nn.Linear = getattr(expert, block_name, None)
+                    if linear is None or not hasattr(linear, "weight"):
+                        continue
+                    orig_fwd = linear.forward
+                    quant_fwd, _ = make_quant_forward(linear, quant_mode, backend=backend)
+                    layer_fwds.append((linear, orig_fwd, quant_fwd))
+            per_layer_forwards[layer_idx] = layer_fwds
+        print(f"  {sum(len(v) for v in per_layer_forwards.values())} linears across {num_layers} layers ready")
+
+        def patch_layer(li):
+            for lin, _, qfwd in per_layer_forwards[li]:
+                lin.forward = qfwd
+
+        def unpatch_layer(li):
+            for lin, ofwd, _ in per_layer_forwards[li]:
+                lin.forward = ofwd
+
+        # ── Determine resume state ─────────────────────────────────────
+        layers_to_compute = list(range(num_layers))
+        start_sample = 0
+        nll_accum = {li: 0.0 for li in layers_to_compute}
+        kl_accum = {li: 0.0 for li in layers_to_compute}
+        token_count_accum = 0  # same for all layers (shared ref)
+        ref_nll_accum = 0.0
+
+        if resume:
+            done_layers = set()
+            partial_start = None
+            for li in layers_to_compute:
+                entry = layer_loss_save.get(li, layer_loss_save.get(str(li)))
+                if entry is None:
+                    continue
+                if not isinstance(entry, dict):
+                    done_layers.add(li)
+                    continue
+                cs = entry.get("completed_samples")
+                ns = entry.get("num_samples")
+                if cs is not None and ns == num_samples and cs < num_samples:
+                    nll_accum[li] = entry.get("nll_sum", 0.0)
+                    kl_accum[li] = entry.get("kl_sum", 0.0)
+                    if partial_start is None:
+                        partial_start = cs
+                        token_count_accum = entry.get("token_count", 0)
+                        ref_nll_accum = entry.get("ref_nll_sum", 0.0)
+                    else:
+                        assert partial_start == cs, (
+                            f"Inconsistent completed_samples: layer {li} has {cs}, expected {partial_start}"
+                        )
+                else:
+                    done_layers.add(li)
+
+            if done_layers:
+                layers_to_compute = [li for li in layers_to_compute if li not in done_layers]
+                nll_accum = {li: nll_accum[li] for li in layers_to_compute}
+                kl_accum = {li: kl_accum[li] for li in layers_to_compute}
+                print(f"  Resume: skipping {len(done_layers)} fully-computed layers")
+            if partial_start is not None:
+                start_sample = partial_start
+                print(f"  Resume: continuing from sample {start_sample}/{num_samples}")
+
+        # ── Save helper ────────────────────────────────────────────────
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+
+        def _save_checkpoint(completed_samples):
+            ref_ppl = torch.exp(torch.tensor(ref_nll_accum / max(token_count_accum, 1))).item()
+            for li in layers_to_compute:
+                q_ppl = torch.exp(torch.tensor(nll_accum[li] / max(token_count_accum, 1))).item()
+                layer_loss_save[li] = {
+                    "perplexity": q_ppl,
+                    "ref_perplexity": ref_ppl,
+                    "ppl_increase": q_ppl - ref_ppl,
+                    "ppl_increase_pct": (q_ppl / ref_ppl - 1) * 100 if ref_ppl > 0 else 0,
+                    "mean_kl": kl_accum[li] / max(token_count_accum, 1),
+                    "nll_sum": nll_accum[li],
+                    "kl_sum": kl_accum[li],
+                    "ref_nll_sum": ref_nll_accum,
+                    "token_count": token_count_accum,
+                    "num_samples": num_samples,
+                    "completed_samples": completed_samples,
+                }
+            with open(save_path, "w") as f:
+                json.dump(layer_loss_save, f, indent=2)
+
+        # ── Lockstep: 1 ref + N_layers quant forwards per sample ──────
+        remaining = num_samples - start_sample
+        print(f"  Lockstep BF16 vs {quant_mode} ({remaining} remaining samples × {len(layers_to_compute)} layers)...")
+        with torch.inference_mode():
+            for i in tqdm(range(start_sample, num_samples), desc=f"BF16 vs {quant_mode} (ppl)",
+                          initial=start_sample, total=num_samples):
+                input_ids = inps[i:i+1, :]
+                shift_targets = input_ids[:, 1:]  # [1, seqlen-1]
+                n_tokens = shift_targets.numel()
+
+                # Reference forward (fully unpatched) → log-probs
+                ref_logits = model(input_ids).logits.float()
+                ref_lp = torch.nn.functional.log_softmax(ref_logits, dim=-1)
+                del ref_logits
+
+                # Reference NLL
+                ref_nll = -ref_lp[:, :-1, :].gather(
+                    dim=-1, index=shift_targets.unsqueeze(-1),
+                ).squeeze(-1).sum().item()
+                ref_nll_accum += ref_nll
+                token_count_accum += n_tokens
+
+                for layer_idx in tqdm(layers_to_compute, leave=False, desc=f"Sample {i} layers"):
+                    patch_layer(layer_idx)
+
+                    q_logits = model(input_ids).logits.float()
+                    q_lp = torch.nn.functional.log_softmax(q_logits, dim=-1)
+                    del q_logits
+
+                    # Quantized NLL
+                    q_nll = -q_lp[:, :-1, :].gather(
+                        dim=-1, index=shift_targets.unsqueeze(-1),
+                    ).squeeze(-1).sum().item()
+                    nll_accum[layer_idx] += q_nll
+
+                    # KL(P_ref || Q_quant)
+                    kl = (ref_lp.exp() * (ref_lp - q_lp)).sum(dim=-1).sum().item()
+                    kl_accum[layer_idx] += kl
+                    del q_lp
+
+                    unpatch_layer(layer_idx)
+
+                del ref_lp
+
+                # Checkpoint after each sample
+                _save_checkpoint(i + 1)
+
+        # ── Finalize and print ─────────────────────────────────────────
+        ref_ppl = torch.exp(torch.tensor(ref_nll_accum / max(token_count_accum, 1))).item()
+        print(f"\n{'='*60}")
+        print(f"  LAYERWISE PERPLEXITY SENSITIVITY ({quant_mode})")
+        print(f"  Reference perplexity (BF16): {ref_ppl:.4f}")
+        print(f"{'='*60}")
+        for layer_idx in range(num_layers):
+            entry = layer_loss_save.get(layer_idx, layer_loss_save.get(str(layer_idx)))
+            if entry is None:
+                continue
+            ppl = entry["perplexity"]
+            delta = entry["ppl_increase"]
+            pct = entry["ppl_increase_pct"]
+            kl = entry["mean_kl"]
+            print(f"  Layer {layer_idx:3d}: ppl={ppl:.4f}  Δppl={delta:+.4f} ({pct:+.2f}%)  KL={kl:.6f}")
+        print(f"  Saved to {save_path}")
+
     ################# QUANTIZE ALL: patch every expert, single measurement #################
     elif metric == "quantize_all":
 
@@ -700,6 +872,7 @@ Metrics:
   layer_out_norm  — L2 norm of single-layer output difference (fast, per-layer)
   model_out_norm  — L2 norm of full-model hidden state difference
   layerwise_model_out_norm — Quantize one layer at a time, measure L2 error on last hidden state
+  layerwise_perplexity     — Quantize one layer at a time, measure perplexity increase + KL
   quantize_all    — Quantize ALL experts, report perplexity + KL (whole-model baseline)
 
 Examples:
@@ -721,9 +894,11 @@ Examples:
                         help="Quantization mode (default: nvfp4)")
     parser.add_argument("--metric", type=str, default="layer_out_norm",
                         choices=["layer_out_norm", "model_out_norm",
-                                 "layerwise_model_out_norm", "quantize_all"],
+                                 "layerwise_model_out_norm", "layerwise_perplexity",
+                                 "quantize_all"],
                         help="Sensitivity metric (default: layer_out_norm). "
                              "layerwise_model_out_norm quantizes one layer at a time and measures L2 error. "
+                             "layerwise_perplexity quantizes one layer at a time and measures perplexity increase. "
                              "quantize_all patches ALL experts and reports perplexity + KL.")
     parser.add_argument("--nsamples", type=int, default=128,
                         help="Number of calibration samples (default: 128)")

@@ -73,10 +73,7 @@ def compute_perplexity(
 
         input_chunk = input_ids[:, begin_loc:end_loc].to(model.model.device)
 
-        if begin_loc == 0:
-            target_start = 1
-        else:
-            target_start = max_length - stride
+        target_start = max(1, max_length - stride) if begin_loc > 0 else 1
 
         with torch.no_grad():
             outputs = model.model(input_chunk)
