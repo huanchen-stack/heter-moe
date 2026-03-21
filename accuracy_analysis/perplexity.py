@@ -14,6 +14,7 @@ def compute_perplexity(
     max_length: int = 2048,
     stride: int = None,
     max_tokens: int = None,
+    checkpoint_path: str = None,
 ):
     """
     Compute perplexity on WikiText-2 test set using sliding window.
@@ -22,6 +23,7 @@ def compute_perplexity(
         max_length: context window size per chunk
         stride: step size between chunks (defaults to max_length // 2)
         max_tokens: cap total tokens for quick testing
+        checkpoint_path: if set, save/resume per-chunk progress to this file
     """
     if stride is None:
         stride = max_length // 2
@@ -38,12 +40,35 @@ def compute_perplexity(
         seq_len = min(seq_len, max_tokens)
         input_ids = input_ids[:, :seq_len]
 
-    print(f"Total tokens: {seq_len}, max_length: {max_length}, stride: {stride}")
+    all_begins = list(range(0, seq_len, stride))
+    total_chunks = len(all_begins)
+    print(f"Total tokens: {seq_len}, max_length: {max_length}, stride: {stride}, chunks: {total_chunks}")
 
-    nlls = []
+    # ── Resume from checkpoint ─────────────────────────────────────
+    nll_sum = 0.0
     total_tokens = 0
+    start_chunk = 0
 
-    for begin_loc in tqdm(range(0, seq_len, stride), desc="Computing PPL"):
+    if checkpoint_path and Path(checkpoint_path).exists():
+        with open(checkpoint_path) as f:
+            ckpt = json.load(f)
+        if (ckpt.get("seq_len") == seq_len
+                and ckpt.get("max_length") == max_length
+                and ckpt.get("stride") == stride):
+            nll_sum = ckpt["nll_sum"]
+            total_tokens = ckpt["total_tokens"]
+            start_chunk = ckpt["completed_chunks"]
+            if start_chunk >= total_chunks:
+                ppl = torch.exp(torch.tensor(nll_sum / total_tokens)).item()
+                print(f"  Already complete (resumed). PPL = {ppl:.4f}")
+                return ppl, total_tokens
+            print(f"  Resume: continuing from chunk {start_chunk}/{total_chunks} "
+                  f"(nll_sum={nll_sum:.2f}, tokens={total_tokens})")
+
+    # ── Main loop ──────────────────────────────────────────────────
+    for chunk_idx in tqdm(range(start_chunk, total_chunks), desc="Computing PPL",
+                          initial=start_chunk, total=total_chunks):
+        begin_loc = all_begins[chunk_idx]
         end_loc = min(begin_loc + max_length, seq_len)
 
         input_chunk = input_ids[:, begin_loc:end_loc].to(model.model.device)
@@ -66,16 +91,33 @@ def compute_perplexity(
             shift_labels.view(-1)
         )
 
-        nlls.append(loss.sum())
-        total_tokens += shift_labels.numel()
+        chunk_nll = loss.sum().item()
+        chunk_tokens = shift_labels.numel()
+        nll_sum += chunk_nll
+        total_tokens += chunk_tokens
+
+        running_ppl = torch.exp(torch.tensor(nll_sum / total_tokens)).item()
+        print(f"  chunk {chunk_idx+1}/{total_chunks}: "
+              f"nll={chunk_nll:.2f}, tokens={chunk_tokens}, running_ppl={running_ppl:.4f}")
+
+        # Checkpoint after each chunk
+        if checkpoint_path:
+            with open(checkpoint_path, "w") as f:
+                json.dump({
+                    "nll_sum": nll_sum,
+                    "total_tokens": total_tokens,
+                    "completed_chunks": chunk_idx + 1,
+                    "seq_len": seq_len,
+                    "max_length": max_length,
+                    "stride": stride,
+                }, f, indent=2)
 
         if end_loc >= seq_len:
             break
 
-    total_nll = torch.stack(nlls).sum()
-    ppl = torch.exp(total_nll / total_tokens)
+    ppl = torch.exp(torch.tensor(nll_sum / total_tokens)).item()
 
-    return ppl.item(), total_tokens
+    return ppl, total_tokens
 
 
 # Available choices:
@@ -85,12 +127,13 @@ def compute_perplexity(
 
 CONFIGS = [
     {"name": "baseline",           "quant_mode": None,    "ratio": 0.0, "criteria": QuantizationCriteria.RANDOM},
-    {"name": "nvfp4_75pct_coldest","quant_mode": "nvfp4", "ratio": 0.75,"criteria": QuantizationCriteria.COLDEST_COUNT},
-    {"name": "nvfp4_75pct_lowest", "quant_mode": "nvfp4", "ratio": 0.75,"criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+    # {"name": "nvfp4_75pct_coldest","quant_mode": "nvfp4", "ratio": 0.75,"criteria": QuantizationCriteria.COLDEST_COUNT},
+    # {"name": "nvfp4_75pct_lowest", "quant_mode": "nvfp4", "ratio": 0.75,"criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
     {"name": "nvfp4_100pct",       "quant_mode": "nvfp4", "ratio": 1.0, "criteria": QuantizationCriteria.RANDOM},
-    {"name": "fp8_75pct_coldest",  "quant_mode": "fp8",   "ratio": 0.75,"criteria": QuantizationCriteria.COLDEST_COUNT},
-    {"name": "fp8_75pct_lowest",   "quant_mode": "fp8",   "ratio": 0.75,"criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
+    # {"name": "fp8_75pct_coldest",  "quant_mode": "fp8",   "ratio": 0.75,"criteria": QuantizationCriteria.COLDEST_COUNT},
+    # {"name": "fp8_75pct_lowest",   "quant_mode": "fp8",   "ratio": 0.75,"criteria": QuantizationCriteria.LOWEST_WEIGHT_SUM},
     {"name": "fp8_100pct",         "quant_mode": "fp8",   "ratio": 1.0, "criteria": QuantizationCriteria.RANDOM},
+    {"name": "a16w4_100pct",         "quant_mode": "a16w4",   "ratio": 1.0, "criteria": QuantizationCriteria.RANDOM},
 ]
 
 
@@ -102,6 +145,7 @@ def run_experiment(
     configs: list = None,
     quant_modes: list = None,
     backend: str = "cudnn",
+    resume: bool = False,
 ):
     """
     Run perplexity experiment comparing baseline vs quantized.
@@ -112,6 +156,7 @@ def run_experiment(
         configs: list of experiment configs (defaults to CONFIGS)
         quant_modes: which quant modes to pre-create (defaults to modes used in configs)
         backend: FlashInfer backend for nvfp4 ("cudnn" or "cutlass")
+        resume: if True, resume from existing checkpoint in output_dir
     """
     if mode == "memory_bound":
         max_length = 512
@@ -134,6 +179,16 @@ def run_experiment(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Resume: load existing results ──────────────────────────────
+    results_file = output_dir / f"ppl_{mode}.json"
+    results = []
+    completed_configs = set()
+    if resume and results_file.exists():
+        with open(results_file) as f:
+            results = json.load(f)
+        completed_configs = {r["config"] for r in results}
+        print(f"Resume: loaded {len(results)} completed configs from {results_file}")
+
     print(f"Loading model: {model_name}")
     print(f"Mode: {mode} (max_length={max_length}, stride={stride})")
     model = MultiPrecisionMoEModel(
@@ -142,11 +197,28 @@ def run_experiment(
         backend=backend,
     )
 
-    results = []
-
     for config in configs:
+        config_name = config["name"]
+
+        if config_name in completed_configs:
+            # Check if the per-chunk checkpoint is fully done (or absent)
+            chunk_ckpt = output_dir / f"ppl_{mode}_{config_name}_chunks.json"
+            if not chunk_ckpt.exists():
+                print(f"  Skip (already done): {config_name}")
+                continue
+            # Checkpoint file exists — might be partial, let it run to finish
+            with open(chunk_ckpt) as f:
+                ckpt = json.load(f)
+            if ckpt.get("completed_chunks", 0) > 0:
+                # Remove the old completed result so we re-add with updated value
+                results = [r for r in results if r["config"] != config_name]
+                completed_configs.discard(config_name)
+            else:
+                print(f"  Skip (already done): {config_name}")
+                continue
+
         print(f"\n{'='*60}")
-        print(f"Running: {config['name']}  [mode={mode}]")
+        print(f"Running: {config_name}  [mode={mode}]")
         print(f"{'='*60}")
 
         model.clear_hooks()
@@ -158,15 +230,18 @@ def run_experiment(
                 criteria=config["criteria"],
             )
 
+        chunk_ckpt_path = str(output_dir / f"ppl_{mode}_{config_name}_chunks.json") if resume else None
+
         ppl, num_tokens = compute_perplexity(
             model,
             max_length=max_length,
             stride=stride,
             max_tokens=max_tokens,
+            checkpoint_path=chunk_ckpt_path,
         )
 
         result = {
-            "config": config["name"],
+            "config": config_name,
             "quant_mode": config["quant_mode"] or "bf16",
             "quantize_ratio": config["ratio"],
             "perplexity": ppl,
@@ -179,12 +254,15 @@ def run_experiment(
 
         print(f"Perplexity: {ppl:.4f}")
 
-    model.clear_hooks()
+        # Save after each config completes
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=2)
 
-    # Save results
-    results_file = output_dir / f"ppl_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(results_file, "w") as f:
-        json.dump(results, f, indent=2)
+        # Clean up chunk checkpoint once config is fully done
+        if chunk_ckpt_path and Path(chunk_ckpt_path).exists():
+            Path(chunk_ckpt_path).unlink()
+
+    model.clear_hooks()
 
     # Print summary
     print(f"\n{'='*60}")
@@ -216,6 +294,8 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./experiment_results")
     parser.add_argument("--backend", type=str, default="cudnn",
                         choices=["cudnn", "cutlass"])
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from existing checkpoint in output_dir")
     args = parser.parse_args()
 
     run_experiment(
@@ -224,4 +304,5 @@ if __name__ == "__main__":
         max_tokens=args.max_tokens,
         output_dir=args.output_dir,
         backend=args.backend,
+        resume=args.resume,
     )
