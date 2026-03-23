@@ -55,12 +55,12 @@ def make_nvfp4_forward(
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
 
-        # Quantize weight — mm_fp4 uses NT convention (computes A @ B^T),
-        # so pass w_fp4 as-is (shape [N, K_packed]), no transpose needed.
         w_global_sf = compute_nvfp4_global_scale(w)
         w_fp4, w_sf = nvfp4_quantize(
             w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
+        w_fp4 = w_fp4.T
+        w_sf = w_sf.T
 
         # Quantize activation
         x_global_sf = compute_nvfp4_global_scale(x)
@@ -191,10 +191,7 @@ def make_a16w4_forward(linear: nn.Linear) -> tuple:
 # ============================================================================
 
 def make_quant_forward(linear: nn.Linear, quant_mode: str, backend: str = "cudnn") -> tuple:
-    """Create a quantized forward function for the given mode.
-
-    Returns (forward_fn, extra_data).
-    """
+    """Create a quantized forward function for the given mode."""
     if quant_mode == "nvfp4":
         return make_nvfp4_forward(linear, backend=backend)
     elif quant_mode == "fp8":
