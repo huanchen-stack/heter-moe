@@ -1,8 +1,7 @@
 """
 NVFP4 / FP8 accuracy test: compare quantized linear output against BF16 reference.
 
-Uses make_quant_forward which auto-falls back to FP8 when NVFP4 dimensions
-don't match (e.g. down_proj where N != K/2).
+Uses make_quant_forward to test NVFP4/FP8 accuracy against BF16 reference.
 
 Usage:
     python test_nvfp4.py
@@ -29,8 +28,7 @@ def test_linear(linear, x):
     nvfp4_fwd, _ = make_quant_forward(linear, "nvfp4", backend="cutlass")
     nvfp4_out = nvfp4_fwd(x)
 
-    N, K = linear.weight.shape
-    mode = "nvfp4" if N == K // 2 else "fp8(fb)"
+    mode = "nvfp4"
 
     return {
         "fp8_cos": cos_sim(ref, fp8_out),
@@ -78,20 +76,20 @@ if __name__ == "__main__":
     # Test 1: Single linear layer
     # ================================================================
     print("=" * 80)
-    print("Single nn.Linear: BF16 vs FP8 vs NVFP4 (auto-fallback to FP8 when N!=K/2)")
+    print("Single nn.Linear: BF16 vs FP8 vs NVFP4")
     print("=" * 80)
     print(f"{'M':>6} {'K':>6} {'N':>6} | {'FP8 cos':>9} {'FP8 err':>9} | {'NV4 cos':>9} {'NV4 err':>9} {'mode':>8}")
     print("-" * 80)
 
     shapes = [
+        (1, 2048, 768),     # Qwen3-30B-A3B gate/up shape
+        (4, 2048, 768),
+        (16, 2048, 768),
+        (128, 2048, 768),
+        (1, 768, 2048),     # Qwen3-30B-A3B down_proj shape
         (1, 2048, 1024),
-        (4, 2048, 1024),
-        (16, 2048, 1024),
-        (128, 2048, 1024),
-        (1, 1024, 2048),    # down_proj shape → auto-fallback to fp8
-        (1, 2048, 256),     # small expert → auto-fallback
-        (1, 256, 2048),     # auto-fallback
-        (512, 2048, 1024),
+        (1, 1024, 2048),
+        (512, 2048, 768),
     ]
 
     for M, K, N in shapes:
@@ -102,21 +100,21 @@ if __name__ == "__main__":
               f"{r['nv4_cos']:>9.4f} {r['nv4_max_err']:>9.4f} {r['nv4_mode']:>8}")
 
     # ================================================================
-    # Test 2: Full ExpertMLP (gate=nvfp4, up=nvfp4, down=fp8 fallback)
+    # Test 2: Full ExpertMLP
     # ================================================================
     print()
     print("=" * 80)
-    print("Full ExpertMLP: BF16 vs FP8 vs NVFP4 (down_proj auto-falls back to FP8)")
+    print("Full ExpertMLP: BF16 vs FP8 vs NVFP4")
     print("=" * 80)
     print(f"{'M':>6} {'hidden':>8} {'inter':>8} | {'FP8 cos':>9} {'FP8 err':>9} | {'NV4 cos':>9} {'NV4 err':>9}")
     print("-" * 80)
 
     expert_shapes = [
+        (1, 2048, 768),     # Qwen3-30B-A3B dimensions
+        (4, 2048, 768),
+        (16, 2048, 768),
+        (128, 2048, 768),
         (1, 2048, 1024),
-        (4, 2048, 1024),
-        (16, 2048, 1024),
-        (128, 2048, 1024),
-        (1, 2048, 256),
     ]
 
     for M, hidden, inter in expert_shapes:
@@ -124,6 +122,30 @@ if __name__ == "__main__":
         print(f"{M:>6} {hidden:>8} {inter:>8} | {r['fp8_cos']:>9.4f} {r['fp8_max_err']:>9.4f} | "
               f"{r['nv4_cos']:>9.4f} {r['nv4_max_err']:>9.4f}")
 
+    # ================================================================
+    # Test 3: Verify FP4 and FP8 produce DIFFERENT outputs
+    # ================================================================
     print()
-    print("nvfp4 = real FP4 GEMM for gate/up, auto-fallback to FP8 for down_proj")
-    print("Expected: all cos > 0.90")
+    print("=" * 80)
+    print("Sanity check: NVFP4 vs FP8 must differ (not silently falling back)")
+    print("=" * 80)
+
+    for M, K, N in [(1, 2048, 768), (1, 768, 2048), (128, 2048, 768)]:
+        linear = nn.Linear(K, N, bias=False, dtype=torch.bfloat16, device="cuda")
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+
+        fp8_fwd, _ = make_quant_forward(linear, "fp8")
+        nv4_fwd, _ = make_quant_forward(linear, "nvfp4", backend="cutlass")
+
+        with torch.no_grad():
+            fp8_out = fp8_fwd(x)
+            nv4_out = nv4_fwd(x)
+
+        same = torch.allclose(fp8_out, nv4_out)
+        diff = (fp8_out - nv4_out).abs().max().item()
+        status = "FAIL (identical!)" if same else "OK (different)"
+        print(f"  [{M:>3}x{K}x{N}] max_diff={diff:.6f}  {status}")
+
+    print()
+    print("nvfp4 = real FP4 GEMM for all projections")
+    print("Expected: all cos > 0.90, all sanity checks OK")

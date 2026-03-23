@@ -5,3 +5,4 @@ TensorRT-LLM
 *egg-info*
 *models*
 *.omc*
+*.claude*

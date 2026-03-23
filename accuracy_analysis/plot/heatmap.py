@@ -1,5 +1,5 @@
 """
-Generate heatmaps from NVFP4 sensitivity analysis results.
+Generate heatmaps from FP8 sensitivity analysis results.
 
 Produces two heatmaps:
   1. Token routing distribution (how many tokens each expert processes)
@@ -168,7 +168,7 @@ def plot_split_heatmap(
 
 def main():
     parser = argparse.ArgumentParser(description="Heatmaps from sensitivity JSON")
-    parser.add_argument("--input", type=str, default="sensitivity.json", help="Input JSON path")
+    parser.add_argument("--input", type=str, default="../calib/fp8/qwen3-30b-a3b-fp8-layer_out_norm.json", help="Input JSON path")
     parser.add_argument("--linear", action="store_true", help="Use linear scale instead of log")
     args = parser.parse_args()
 

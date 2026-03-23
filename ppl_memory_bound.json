@@ -1,0 +1,32 @@
+[
+  {
+    "config": "baseline",
+    "quant_mode": "bf16",
+    "quantize_ratio": 0.0,
+    "perplexity": 11.30675983428955,
+    "num_tokens": 298354,
+    "mode": "memory_bound",
+    "max_length": 512,
+    "timestamp": "2026-03-21T01:19:16.422836"
+  },
+  {
+    "config": "nvfp4_100pct",
+    "quant_mode": "nvfp4",
+    "quantize_ratio": 1.0,
+    "perplexity": 11.365425109863281,
+    "num_tokens": 298354,
+    "mode": "memory_bound",
+    "max_length": 512,
+    "timestamp": "2026-03-21T02:50:52.265915"
+  },
+  {
+    "config": "fp8_100pct",
+    "quant_mode": "fp8",
+    "quantize_ratio": 1.0,
+    "perplexity": 11.365425109863281,
+    "num_tokens": 298354,
+    "mode": "memory_bound",
+    "max_length": 512,
+    "timestamp": "2026-03-21T04:22:10.747936"
+  }
+]
