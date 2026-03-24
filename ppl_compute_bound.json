@@ -19,14 +19,14 @@
     "max_length": 8192,
     "timestamp": "2026-03-24T00:17:50.235787"
   },
-  {
+    {
     "config": "nvfp4_100pct",
     "quant_mode": "nvfp4",
     "quantize_ratio": 1.0,
-    "perplexity": 11.5986328125,
-    "num_tokens": 298354,
-    "mode": "memory_bound",
-    "max_length": 512,
-    "timestamp": "2026-03-23T23:29:13.190507"
+    "perplexity": 7.911973476409912,
+    "num_tokens": 298901,
+    "mode": "compute_bound",
+    "max_length": 8192,
+    "timestamp": "2026-03-23T23:58:38.038328"
   }
 ]
