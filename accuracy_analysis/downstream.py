@@ -193,15 +193,16 @@ def run_experiment(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Resume: load existing results ──────────────────────────────
-    task_suffix = "_".join(sorted(tasks))
-    results_file = output_dir / f"downstream_{task_suffix}.json"
+    results_file = output_dir / "downstream_results.json"
     results = []
-    completed_configs = set()
+    completed_tasks = set()
     if resume and results_file.exists():
         with open(results_file) as f:
             results = json.load(f)
-        completed_configs = {r["config"] for r in results}
-        print(f"Resume: loaded {len(results)} completed configs from {results_file}")
+        for r in results:
+            for task_key in r.get("tasks", {}):
+                completed_tasks.add((r["config"], task_key))
+        print(f"Resume: {len(completed_tasks)} (config, task) pairs already done")
 
     # ── Load model once ────────────────────────────────────────────
     print(f"Loading model: {model_name}")
@@ -213,16 +214,17 @@ def run_experiment(
         backend=backend,
     )
 
-    # ── Per-config evaluation loop ─────────────────────────────────
+    # ── Per-config, per-task evaluation loop ───────────────────────
     for config in configs:
         config_name = config["name"]
+        pending_tasks = [t for t in tasks if (config_name, t) not in completed_tasks]
 
-        if config_name in completed_configs:
-            print(f"  Skip (already done): {config_name}")
+        if not pending_tasks:
+            print(f"  Skip (all tasks done): {config_name}")
             continue
 
         print(f"\n{'='*60}")
-        print(f"Running: {config_name}")
+        print(f"Running: {config_name}  ({len(pending_tasks)} tasks remaining)")
         print(f"{'='*60}")
 
         model.clear_hooks()
@@ -234,41 +236,44 @@ def run_experiment(
                 criteria=config["criteria"],
             )
 
-        task_results = run_single_eval(
-            model,
-            tasks=tasks,
-            batch_size=batch_size,
-            limit=limit,
-            num_fewshot=num_fewshot,
-        )
+        existing = next((r for r in results if r["config"] == config_name), None)
+        if existing is None:
+            existing = {
+                "config": config_name,
+                "quant_mode": config["quant_mode"] or "bf16",
+                "quantize_ratio": config["ratio"],
+                "tasks": {},
+                "timestamp": datetime.now().isoformat(),
+            }
+            results.append(existing)
 
-        result = {
-            "config": config_name,
-            "quant_mode": config["quant_mode"] or "bf16",
-            "quantize_ratio": config["ratio"],
-            "tasks": {},
-            "timestamp": datetime.now().isoformat(),
-        }
-        for task_key, task_data in task_results.items():
-            result["tasks"][task_key] = {
+        for task_key in pending_tasks:
+            display = TASK_REGISTRY[task_key]["display_name"]
+            print(f"\n  ── {display} ──")
+
+            task_result = run_single_eval(
+                model,
+                tasks=[task_key],
+                batch_size=batch_size,
+                limit=limit,
+                num_fewshot=num_fewshot,
+            )
+
+            task_data = task_result[task_key]
+            existing["tasks"][task_key] = {
                 "primary_metric": task_data["primary_metric"],
                 "primary_metric_name": task_data["primary_metric_name"],
-                "display_name": TASK_REGISTRY[task_key]["display_name"],
+                "display_name": display,
                 "all_metrics": task_data["all_metrics"],
             }
+            existing["timestamp"] = datetime.now().isoformat()
 
-        results.append(result)
+            val_str = f"{task_data['primary_metric']:.4f}" if task_data["primary_metric"] is not None else "N/A"
+            print(f"  {display}: {task_data['primary_metric_name']} = {val_str}")
 
-        for task_key, task_data in task_results.items():
-            display = TASK_REGISTRY[task_key]["display_name"]
-            primary = task_data["primary_metric"]
-            metric_name = task_data["primary_metric_name"]
-            val_str = f"{primary:.4f}" if primary is not None else "N/A"
-            print(f"  {display}: {metric_name} = {val_str}")
-
-        with open(results_file, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"  Saved to {results_file}")
+            with open(results_file, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"  Checkpoint saved to {results_file}")
 
     model.clear_hooks()
 

@@ -27,7 +27,6 @@ BATCH_SIZE="auto"
 LIMIT=""
 TASKS=""
 NUM_FEWSHOT=""
-RESUME=false
 
 QWEN3_DIR="${MODEL_DIR}/Qwen3-30B-A3B"
 
@@ -44,7 +43,6 @@ SKIP_DOWNLOAD=false
 for arg in "$@"; do
     case $arg in
         --skip-download) SKIP_DOWNLOAD=true ;;
-        --resume) RESUME=true ;;
         --backend=*) BACKEND="${arg#*=}" ;;
         --batch-size=*) BATCH_SIZE="${arg#*=}" ;;
         --limit=*) LIMIT="${arg#*=}" ;;
@@ -120,19 +118,40 @@ print(f'    num_experts:   {getattr(config, \"num_experts\", \"N/A\")}')
 log "Model verified"
 
 # =============================================================================
-# STEP 3: Run downstream evaluation
+# STEP 3: Pre-download evaluation datasets
 # =============================================================================
 echo ""
 echo "============================================================"
-echo " Step 3: Downstream Evaluation"
+echo " Step 3: Pre-download evaluation datasets"
+echo "============================================================"
+
+python -c "
+from datasets import load_dataset
+for name, config in [
+    ('cais/mmlu', 'all'),
+    ('openai/gsm8k', 'main'),
+    ('Rowan/hellaswag', None),
+    ('allenai/winogrande', 'winogrande_xl'),
+]:
+    print(f'  Caching {name} ({config or \"default\"})...', end=' ', flush=True)
+    load_dataset(name, config, trust_remote_code=True)
+    print('OK')
+print('  All datasets cached.')
+"
+
+log "Datasets ready"
+
+# =============================================================================
+# STEP 4: Run downstream evaluation
+# =============================================================================
+echo ""
+echo "============================================================"
+echo " Step 4: Downstream Evaluation"
 echo "============================================================"
 
 mkdir -p "${OUTPUT_DIR}"
 
-EXTRA_FLAGS=""
-if [ "$RESUME" = true ]; then
-    EXTRA_FLAGS="${EXTRA_FLAGS} --resume"
-fi
+EXTRA_FLAGS="--resume"
 if [ -n "$LIMIT" ]; then
     EXTRA_FLAGS="${EXTRA_FLAGS} --limit ${LIMIT}"
 fi
@@ -157,7 +176,7 @@ python "${SCRIPT_DIR}/downstream.py" \
 log "Downstream evaluation complete"
 
 # =============================================================================
-# STEP 4: Summary
+# STEP 5: Summary
 # =============================================================================
 echo ""
 echo "============================================================"
