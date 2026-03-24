@@ -95,6 +95,71 @@ def make_nvfp4_forward(
     return nvfp4_forward, None
 
 
+def make_nvfp4_forward_prequantized(
+    linear: nn.Linear,
+    backend: str = "cudnn",
+) -> tuple:
+    """Create an NVFP4 forward with pre-quantized weights.
+
+    Weights are quantized once and stored in the closure. The original BF16
+    weight is deleted from the linear module to free GPU memory.
+    Only activation is quantized on each forward call.
+
+    Returns (forward_fn, cleanup_fn). Call cleanup_fn() to delete BF16 weight.
+    """
+    from flashinfer import nvfp4_quantize, mm_fp4, SfLayout
+    effective_backend = [backend]
+
+    w = linear.weight.data
+    bias = linear.bias
+
+    w_global_sf = compute_nvfp4_global_scale(w)
+    w_fp4, w_sf = nvfp4_quantize(
+        w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
+    )
+    w_fp4 = w_fp4.T.contiguous()
+    w_sf = w_sf.T.contiguous()
+    w_global_sf_val = w_global_sf.item()
+
+    def nvfp4_forward_preq(input: Tensor) -> Tensor:
+        orig_shape = input.shape
+        x = input.reshape(-1, orig_shape[-1])
+
+        x_global_sf = compute_nvfp4_global_scale(x)
+        x_fp4, x_sf = nvfp4_quantize(
+            x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
+        )
+
+        alpha = torch.tensor(
+            1.0 / (x_global_sf.item() * w_global_sf_val),
+            device=x.device, dtype=torch.float32,
+        )
+
+        try:
+            out = mm_fp4(
+                x_fp4, w_fp4, x_sf, w_sf, alpha,
+                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
+                backend=effective_backend[0], use_nvfp4=True,
+            )
+        except RuntimeError:
+            if effective_backend[0] != "cutlass":
+                effective_backend[0] = "cutlass"
+            out = mm_fp4(
+                x_fp4, w_fp4, x_sf, w_sf, alpha,
+                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
+                backend="cutlass", use_nvfp4=True,
+            )
+
+        if bias is not None:
+            out = out + bias
+        return out.reshape(*orig_shape[:-1], out.shape[-1])
+
+    def cleanup():
+        linear.weight = None
+
+    return nvfp4_forward_preq, cleanup
+
+
 # ============================================================================
 # FP8 (W8A8) — Real FP8 Tensor Core GEMM via FlashInfer
 # ============================================================================
@@ -138,6 +203,49 @@ def make_fp8_forward(linear: nn.Linear) -> tuple:
         return out.reshape(*orig_shape[:-1], out.shape[-1])
 
     return fp8_forward, None
+
+
+def make_fp8_forward_prequantized(linear: nn.Linear) -> tuple:
+    """Create a W8A8 FP8 forward with pre-quantized weights.
+
+    Weights are quantized once and stored in the closure. The original BF16
+    weight is deleted from the linear module to free GPU memory.
+    Only activation is quantized on each forward call.
+
+    Returns (forward_fn, cleanup_fn). Call cleanup_fn() to delete BF16 weight.
+    """
+    from flashinfer.gemm import gemm_fp8_nt_groupwise
+    from flashinfer.testing.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+
+    w = linear.weight.data
+    bias = linear.bias
+    N, K = w.shape
+
+    w_fp8, w_sf = per_block_cast_to_fp8(w)
+    b_scale = w_sf.T.contiguous()
+
+    def fp8_forward_preq(input: Tensor) -> Tensor:
+        orig_shape = input.shape
+        x = input.reshape(-1, orig_shape[-1])
+        M = x.shape[0]
+
+        x_fp8, x_sf = per_token_cast_to_fp8(x)
+        a_scale = x_sf.T.contiguous()
+
+        out = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
+        gemm_fp8_nt_groupwise(
+            x_fp8, w_fp8, a_scale, b_scale,
+            out=out, scale_major_mode="MN",
+        )
+
+        if bias is not None:
+            out = out + bias
+        return out.reshape(*orig_shape[:-1], out.shape[-1])
+
+    def cleanup():
+        linear.weight = None
+
+    return fp8_forward_preq, cleanup
 
 
 # ============================================================================
@@ -190,8 +298,25 @@ def make_a16w4_forward(linear: nn.Linear) -> tuple:
 # Dispatch
 # ============================================================================
 
-def make_quant_forward(linear: nn.Linear, quant_mode: str, backend: str = "cudnn") -> tuple:
-    """Create a quantized forward function for the given mode."""
+def make_quant_forward(
+    linear: nn.Linear, quant_mode: str, backend: str = "cudnn", prequantize: bool = False,
+) -> tuple:
+    """Create a quantized forward function for the given mode.
+
+    When prequantize=True, weights are quantized once and BF16 originals can be
+    freed. Returns (forward_fn, cleanup_fn) where cleanup_fn deletes BF16 weight.
+    This is irreversible — use only when all experts will be quantized (ratio=1.0).
+    """
+    if prequantize:
+        if quant_mode == "nvfp4":
+            return make_nvfp4_forward_prequantized(linear, backend=backend)
+        elif quant_mode == "fp8":
+            return make_fp8_forward_prequantized(linear)
+        elif quant_mode == "a16w4":
+            return make_a16w4_forward(linear)
+        else:
+            raise ValueError(f"Unknown quant_mode: {quant_mode}")
+
     if quant_mode == "nvfp4":
         return make_nvfp4_forward(linear, backend=backend)
     elif quant_mode == "fp8":

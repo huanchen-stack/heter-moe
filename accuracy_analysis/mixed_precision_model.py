@@ -264,11 +264,63 @@ class MultiPrecisionMoEModel:
                 self.register_expert_override(layer_id, expert_id, quant_mode)
         logger.debug("Quantized all experts with mode %s.", quant_mode)
 
+    def quantize_all_experts_prequantized(self, quant_mode="nvfp4", layer_ids=None):
+        """Pre-quantize all expert weights and free BF16 originals.
+
+        This is irreversible — original weights are deleted to save GPU memory.
+        Use only when quantize_ratio=1.0 (all experts quantized).
+        clear_hooks() will NOT restore original weights after this call.
+        """
+        block_names = self._expert_config["block_names"]
+        labels = self._expert_config["labels"]
+        layers = self.model.model.layers
+        layer_ids = layer_ids if layer_ids is not None else range(len(layers))
+        cleanups = []
+
+        for layer_id in layer_ids:
+            if not hasattr(layers[layer_id].mlp, "experts"):
+                continue
+            experts = layers[layer_id].mlp.experts
+            if not isinstance(experts, nn.ModuleList):
+                continue
+            for expert_id in range(len(experts)):
+                expert = experts[expert_id]
+                for block_name, label in zip(block_names, labels):
+                    proj = getattr(expert, block_name)
+                    fwd, cleanup = make_quant_forward(
+                        proj, quant_mode, backend=self.backend, prequantize=True,
+                    )
+                    self._patched_forwards.append((proj, proj.forward))
+                    proj.forward = fwd
+                    if cleanup is not None:
+                        cleanups.append(cleanup)
+
+        for cleanup in cleanups:
+            cleanup()
+
+        torch.cuda.empty_cache()
+        logger.info(
+            "Pre-quantized all experts with mode %s. BF16 weights freed.", quant_mode,
+        )
+
     def quantize_all_layers(
             self, quant_mode="nvfp4", quantize_ratio=0.5,
             criteria=QuantizationCriteria.RANDOM, layer_ids=None,
+            prequantize: bool = False,
         ):
-        """Register dynamic per-batch expert selection hooks on all layers."""
+        """Register dynamic per-batch expert selection hooks on all layers.
+
+        When quantize_ratio=1.0 and prequantize=True, skips hook-based dynamic
+        selection and uses pre-quantized static forwards instead. This frees
+        BF16 weights and is irreversible.
+        """
+        if quantize_ratio >= 1.0 and prequantize:
+            logger.info("ratio=1.0 + prequantize: using static pre-quantized path")
+            self.quantize_all_experts_prequantized(
+                quant_mode=quant_mode, layer_ids=layer_ids,
+            )
+            return
+
         layers = self.model.model.layers
         layer_ids = layer_ids if layer_ids is not None else range(len(layers))
         for layer_id in layer_ids:

@@ -1,0 +1,97 @@
+[
+  {
+    "config": "baseline",
+    "quant_mode": "bf16",
+    "quantize_ratio": 0.0,
+    "tasks": {
+      "hellaswag": {
+        "primary_metric": 0.7766381198964349,
+        "primary_metric_name": "acc_norm,none",
+        "display_name": "HellaSwag (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.5954989046006771,
+          "acc_stderr,none": 0.004897921845492068,
+          "acc_norm,none": 0.7766381198964349,
+          "acc_norm_stderr,none": 0.004156477140909435
+        }
+      },
+      "winogrande": {
+        "primary_metric": 0.7063930544593529,
+        "primary_metric_name": "acc,none",
+        "display_name": "WinoGrande (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.7063930544593529,
+          "acc_stderr,none": 0.012799397296204265
+        }
+      },
+      "gsm8k_cot": {
+        "primary_metric": 0.8749052312357847,
+        "primary_metric_name": "exact_match,strict-match",
+        "display_name": "GSM8k-CoT (8-shot)",
+        "all_metrics": {
+          "exact_match,strict-match": 0.8749052312357847,
+          "exact_match_stderr,strict-match": 0.009112601439849639,
+          "exact_match,flexible-extract": 0.8976497346474602,
+          "exact_match_stderr,flexible-extract": 0.008349110996208829
+        }
+      }
+    },
+    "timestamp": "2026-03-24T13:19:40.431949"
+  },
+  {
+    "config": "nvfp4_100pct",
+    "quant_mode": "nvfp4",
+    "quantize_ratio": 1.0,
+    "tasks": {
+      "hellaswag": {
+        "primary_metric": 0.7724556861183032,
+        "primary_metric_name": "acc_norm,none",
+        "display_name": "HellaSwag (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.5900219079864569,
+          "acc_stderr,none": 0.00490824135431011,
+          "acc_norm,none": 0.7724556861183032,
+          "acc_norm_stderr,none": 0.004183900014451072
+        }
+      },
+      "winogrande": {
+        "primary_metric": 0.6898184688239937,
+        "primary_metric_name": "acc,none",
+        "display_name": "WinoGrande (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.6898184688239937,
+          "acc_stderr,none": 0.0130004541448598
+        }
+      }
+    },
+    "timestamp": "2026-03-24T06:42:17.741953"
+  },
+  {
+    "config": "fp8_100pct",
+    "quant_mode": "fp8",
+    "quantize_ratio": 1.0,
+    "tasks": {
+      "hellaswag": {
+        "primary_metric": 0.7754431388169687,
+        "primary_metric_name": "acc_norm,none",
+        "display_name": "HellaSwag (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.5939055964947222,
+          "acc_stderr,none": 0.004900988997413755,
+          "acc_norm,none": 0.7754431388169687,
+          "acc_norm_stderr,none": 0.00416437336285952
+        }
+      },
+      "winogrande": {
+        "primary_metric": 0.7032359905288083,
+        "primary_metric_name": "acc,none",
+        "display_name": "WinoGrande (0-shot)",
+        "all_metrics": {
+          "acc,none": 0.7032359905288083,
+          "acc_stderr,none": 0.012839239695201914
+        }
+      }
+    },
+    "timestamp": "2026-03-24T06:46:56.874132"
+  }
+]
