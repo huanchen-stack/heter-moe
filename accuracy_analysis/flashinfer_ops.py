@@ -51,9 +51,12 @@ def _nvfp4_quantize_fake(
     sf_layout_value: int, do_shuffle: bool, sf_vec_size: int,
 ) -> Tuple[Tensor, Tensor]:
     m, k = a.shape
+    padded_m = ((m + 127) // 128) * 128
+    sf_cols = k // sf_vec_size
+    padded_sf_cols = ((sf_cols + 3) // 4) * 4
     return (
         a.new_empty([m, k // 2], dtype=torch.uint8),
-        a.new_empty([m, k // sf_vec_size], dtype=torch.uint8),
+        a.new_empty([padded_m, padded_sf_cols], dtype=torch.uint8),
     )
 
 
