@@ -70,7 +70,10 @@ def make_nvfp4_forward(
             x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
 
-        alpha = (1.0 / (x_global_sf * w_global_sf)).to(dtype=torch.float32)
+        alpha = torch.tensor(
+            1.0 / (x_global_sf.item() * w_global_sf.item()),
+            device=x.device, dtype=torch.float32,
+        )
 
         try:
             out = mm_fp4(
