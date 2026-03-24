@@ -1,4 +1,5 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import gc
 import torch
 import torch.nn as nn
 import logging
@@ -119,6 +120,7 @@ class MultiPrecisionMoEModel:
 
         self._hook_handles = []
         self._patched_forwards = []  # [(proj_module, original_forward), ...]
+        self._is_prequantized = False
 
     def _setup_quant_forwards(self):
         block_names = self._expert_config["block_names"]
@@ -242,6 +244,16 @@ class MultiPrecisionMoEModel:
 
     def clear_hooks(self):
         """Remove all hooks and restore monkey-patched forwards."""
+        if self._is_prequantized:
+            logger.warning(
+                "Model is pre-quantized — BF16 weights are gone. "
+                "Cannot restore original forwards. Reload model to get BF16 back."
+            )
+            for handle in self._hook_handles:
+                handle.remove()
+            self._hook_handles = []
+            return
+
         for handle in self._hook_handles:
             handle.remove()
         self._hook_handles = []
@@ -277,6 +289,8 @@ class MultiPrecisionMoEModel:
         layer_ids = layer_ids if layer_ids is not None else range(len(layers))
         cleanups = []
 
+        vram_before = torch.cuda.memory_allocated() / 1024**3
+
         for layer_id in layer_ids:
             if not hasattr(layers[layer_id].mlp, "experts"):
                 continue
@@ -290,7 +304,6 @@ class MultiPrecisionMoEModel:
                     fwd, cleanup = make_quant_forward(
                         proj, quant_mode, backend=self.backend, prequantize=True,
                     )
-                    self._patched_forwards.append((proj, proj.forward))
                     proj.forward = fwd
                     if cleanup is not None:
                         cleanups.append(cleanup)
@@ -298,9 +311,17 @@ class MultiPrecisionMoEModel:
         for cleanup in cleanups:
             cleanup()
 
+        self._quant_forwards.clear()
+        self._is_prequantized = True
+
+        gc.collect()
         torch.cuda.empty_cache()
+
+        vram_after = torch.cuda.memory_allocated() / 1024**3
         logger.info(
-            "Pre-quantized all experts with mode %s. BF16 weights freed.", quant_mode,
+            "Pre-quantized all experts with mode %s. "
+            "VRAM: %.2f GB → %.2f GB (freed %.2f GB)",
+            quant_mode, vram_before, vram_after, vram_before - vram_after,
         )
 
     def quantize_all_layers(
