@@ -33,8 +33,7 @@ def nvfp4_quantize(
     do_shuffle: bool,
     sf_vec_size: int,
 ) -> Tuple[Tensor, Tensor]:
-    from flashinfer import nvfp4_quantize as _nvfp4_quantize
-    from flashinfer.tllm_enums import SfLayout
+    from flashinfer import nvfp4_quantize as _nvfp4_quantize, SfLayout
 
     layout_map = {0: SfLayout.layout_linear, 1: SfLayout.layout_8x4, 2: SfLayout.layout_128x4}
     sf_layout = layout_map.get(sf_layout_value, SfLayout.layout_128x4)
