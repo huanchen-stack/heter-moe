@@ -92,6 +92,12 @@ def make_nvfp4_forward(
     return nvfp4_forward, None
 
 
+@torch.compiler.disable
+def _eager_nvfp4_quantize(x: Tensor, x_global_sf: Tensor) -> tuple:
+    from flashinfer import nvfp4_quantize, SfLayout
+    return nvfp4_quantize(x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False)
+
+
 def make_nvfp4_forward_prequantized(
     linear: nn.Linear,
     backend: str = "cudnn",
@@ -127,9 +133,7 @@ def make_nvfp4_forward_prequantized(
         x = input.reshape(-1, orig_shape[-1])
 
         x_global_sf = compute_nvfp4_global_scale(x)
-        x_fp4, x_sf = nvfp4_quantize(
-            x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
-        )
+        x_fp4, x_sf = _eager_nvfp4_quantize(x, x_global_sf)
 
         alpha = (w_global_sf_inv / x_global_sf).to(dtype=torch.float32)
 
@@ -224,13 +228,11 @@ def make_fp8_forward_prequantized(
     def fp8_forward_preq(input: Tensor) -> Tensor:
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
-        M = x.shape[0]
 
         x_fp8, x_sf = wrapped_per_token_cast_to_fp8(x)
         a_scale = x_sf.T.contiguous()
 
-        out = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
-        wrapped_gemm(x_fp8, w_fp8, a_scale, b_scale, out)
+        out = wrapped_gemm(x_fp8, w_fp8, a_scale, b_scale)
 
         if bias is not None:
             out = out + bias

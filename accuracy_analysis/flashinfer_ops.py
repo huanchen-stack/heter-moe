@@ -137,15 +137,17 @@ def _per_block_cast_to_fp8_fake(w: Tensor) -> Tuple[Tensor, Tensor]:
 
 @torch.library.custom_op(
     "heter_moe::gemm_fp8_nt_groupwise",
-    mutates_args=["out"],
+    mutates_args=[],
     device_types="cuda",
 )
 def gemm_fp8_nt_groupwise(
     x_fp8: Tensor, w_fp8: Tensor,
     a_scale: Tensor, b_scale: Tensor,
-    out: Tensor,
 ) -> Tensor:
     from flashinfer.gemm import gemm_fp8_nt_groupwise as _gemm
+    M = x_fp8.shape[0]
+    N = w_fp8.shape[0]
+    out = torch.empty(M, N, dtype=torch.bfloat16, device=x_fp8.device)
     _gemm(x_fp8, w_fp8, a_scale, b_scale, out=out, scale_major_mode="MN")
     return out
 
@@ -154,6 +156,5 @@ def gemm_fp8_nt_groupwise(
 def _gemm_fp8_nt_groupwise_fake(
     x_fp8: Tensor, w_fp8: Tensor,
     a_scale: Tensor, b_scale: Tensor,
-    out: Tensor,
 ) -> Tensor:
-    return out
+    return torch.empty(x_fp8.shape[0], w_fp8.shape[0], dtype=torch.bfloat16, device=x_fp8.device)
