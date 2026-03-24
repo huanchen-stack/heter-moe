@@ -103,14 +103,12 @@ def make_nvfp4_forward_prequantized(
     weight is deleted from the linear module to free GPU memory.
     Only activation is quantized on each forward call.
 
-    Uses torch.library.custom_op wrappers so the forward is torch.compile-safe.
+    Keeps activation quantization eager and wraps only the GEMM path for compile.
     Returns (forward_fn, cleanup_fn). Call cleanup_fn() to delete BF16 weight.
     """
     from flashinfer import nvfp4_quantize, SfLayout
     from flashinfer_ops import (
-        nvfp4_quantize as wrapped_nvfp4_quantize,
         mm_fp4 as wrapped_mm_fp4,
-        SF_LAYOUT_128x4,
     )
 
     w = linear.weight.data
@@ -129,8 +127,8 @@ def make_nvfp4_forward_prequantized(
         x = input.reshape(-1, orig_shape[-1])
 
         x_global_sf = compute_nvfp4_global_scale(x)
-        x_fp4, x_sf = wrapped_nvfp4_quantize(
-            x, x_global_sf, SF_LAYOUT_128x4, False, 16,
+        x_fp4, x_sf = nvfp4_quantize(
+            x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
 
         alpha = (w_global_sf_inv / x_global_sf).to(dtype=torch.float32)
