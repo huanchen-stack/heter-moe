@@ -163,6 +163,7 @@ def run_experiment(
     limit: int | None = None,
     num_fewshot: int | None = None,
     resume: bool = False,
+    prequantize: bool = False,
 ):
     """
     Run downstream evaluation comparing baseline vs quantized configs.
@@ -234,6 +235,7 @@ def run_experiment(
                 quant_mode=config["quant_mode"],
                 quantize_ratio=config["ratio"],
                 criteria=config["criteria"],
+                prequantize=prequantize,
             )
 
         existing = next((r for r in results if r["config"] == config_name), None)
@@ -354,6 +356,8 @@ Examples:
                         help="Override fewshot count for all tasks (default: use task YAML default)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing checkpoint in output_dir")
+    parser.add_argument("--prequantize", action="store_true",
+                        help="Pre-quantize weights and free BF16 (saves VRAM, irreversible)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -370,4 +374,5 @@ Examples:
         limit=args.limit,
         num_fewshot=args.num_fewshot,
         resume=args.resume,
+        prequantize=args.prequantize,
     )

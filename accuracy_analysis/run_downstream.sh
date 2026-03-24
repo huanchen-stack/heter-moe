@@ -27,6 +27,7 @@ BATCH_SIZE="auto"
 LIMIT=""
 TASKS=""
 NUM_FEWSHOT=""
+PREQUANTIZE=false
 
 QWEN3_DIR="${MODEL_DIR}/Qwen3-30B-A3B"
 
@@ -49,6 +50,7 @@ for arg in "$@"; do
         --tasks=*) TASKS="${arg#*=}" ;;
         --num-fewshot=*) NUM_FEWSHOT="${arg#*=}" ;;
         --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
+        --prequantize) PREQUANTIZE=true ;;
     esac
 done
 
@@ -157,6 +159,9 @@ if [ -n "$LIMIT" ]; then
 fi
 if [ -n "$NUM_FEWSHOT" ]; then
     EXTRA_FLAGS="${EXTRA_FLAGS} --num_fewshot ${NUM_FEWSHOT}"
+fi
+if [ "$PREQUANTIZE" = true ]; then
+    EXTRA_FLAGS="${EXTRA_FLAGS} --prequantize"
 fi
 
 TASK_FLAGS=""
