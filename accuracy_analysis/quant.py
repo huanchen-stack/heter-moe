@@ -31,9 +31,7 @@ def compute_nvfp4_global_scale(tensor: Tensor) -> Tensor:
     range of the two-level NVFP4 scaling scheme:
         value ≈ global_scale * block_scale_fp8 * fp4_value
     """
-    absmax = tensor.abs().max()
-    if torch.isnan(absmax):
-        absmax = tensor.float().abs().nan_to_num().max()
+    absmax = tensor.float().abs().nan_to_num().max()
     return (448.0 * 6.0) / absmax.clamp(min=1e-12)
 
 
@@ -97,6 +95,7 @@ def make_nvfp4_forward(
 def make_nvfp4_forward_prequantized(
     linear: nn.Linear,
     backend: str = "cudnn",
+    use_compile: bool = True,
 ) -> tuple:
     """Create an NVFP4 forward with pre-quantized weights.
 
@@ -104,10 +103,15 @@ def make_nvfp4_forward_prequantized(
     weight is deleted from the linear module to free GPU memory.
     Only activation is quantized on each forward call.
 
+    Uses torch.library.custom_op wrappers so the forward is torch.compile-safe.
     Returns (forward_fn, cleanup_fn). Call cleanup_fn() to delete BF16 weight.
     """
-    from flashinfer import nvfp4_quantize, mm_fp4, SfLayout
-    effective_backend = [backend]
+    from flashinfer import nvfp4_quantize, SfLayout
+    from flashinfer_ops import (
+        nvfp4_quantize as wrapped_nvfp4_quantize,
+        mm_fp4 as wrapped_mm_fp4,
+        SF_LAYOUT_128x4,
+    )
 
     w = linear.weight.data
     bias = linear.bias
@@ -125,35 +129,27 @@ def make_nvfp4_forward_prequantized(
         x = input.reshape(-1, orig_shape[-1])
 
         x_global_sf = compute_nvfp4_global_scale(x)
-        x_fp4, x_sf = nvfp4_quantize(
-            x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
+        x_fp4, x_sf = wrapped_nvfp4_quantize(
+            x, x_global_sf, SF_LAYOUT_128x4, False, 16,
         )
 
         alpha = (w_global_sf_inv / x_global_sf).to(dtype=torch.float32)
 
-        try:
-            out = mm_fp4(
-                x_fp4, w_fp4, x_sf, w_sf, alpha,
-                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
-                backend=effective_backend[0], use_nvfp4=True,
-            )
-        except RuntimeError:
-            if effective_backend[0] != "cutlass":
-                effective_backend[0] = "cutlass"
-            out = mm_fp4(
-                x_fp4, w_fp4, x_sf, w_sf, alpha,
-                out_dtype=torch.bfloat16, block_size=NVFP4_BLOCK_SIZE,
-                backend="cutlass", use_nvfp4=True,
-            )
+        out = wrapped_mm_fp4(
+            x_fp4, w_fp4, x_sf, w_sf, alpha,
+            NVFP4_BLOCK_SIZE, backend,
+        )
 
         if bias is not None:
             out = out + bias
         return out.reshape(*orig_shape[:-1], out.shape[-1])
 
+    compiled_fwd = torch.compile(nvfp4_forward_preq, dynamic=True) if use_compile else nvfp4_forward_preq
+
     def cleanup():
         linear.weight = None
 
-    return nvfp4_forward_preq, cleanup
+    return compiled_fwd, cleanup
 
 
 # ============================================================================
@@ -201,17 +197,24 @@ def make_fp8_forward(linear: nn.Linear) -> tuple:
     return fp8_forward, None
 
 
-def make_fp8_forward_prequantized(linear: nn.Linear) -> tuple:
+def make_fp8_forward_prequantized(
+    linear: nn.Linear,
+    use_compile: bool = True,
+) -> tuple:
     """Create a W8A8 FP8 forward with pre-quantized weights.
 
     Weights are quantized once and stored in the closure. The original BF16
     weight is deleted from the linear module to free GPU memory.
     Only activation is quantized on each forward call.
 
+    Uses torch.library.custom_op wrappers so the forward is torch.compile-safe.
     Returns (forward_fn, cleanup_fn). Call cleanup_fn() to delete BF16 weight.
     """
-    from flashinfer.gemm import gemm_fp8_nt_groupwise
-    from flashinfer.testing.utils import per_token_cast_to_fp8, per_block_cast_to_fp8
+    from flashinfer.testing.utils import per_block_cast_to_fp8
+    from flashinfer_ops import (
+        per_token_cast_to_fp8 as wrapped_per_token_cast_to_fp8,
+        gemm_fp8_nt_groupwise as wrapped_gemm,
+    )
 
     w = linear.weight.data
     bias = linear.bias
@@ -225,23 +228,22 @@ def make_fp8_forward_prequantized(linear: nn.Linear) -> tuple:
         x = input.reshape(-1, orig_shape[-1])
         M = x.shape[0]
 
-        x_fp8, x_sf = per_token_cast_to_fp8(x)
+        x_fp8, x_sf = wrapped_per_token_cast_to_fp8(x)
         a_scale = x_sf.T.contiguous()
 
         out = torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
-        gemm_fp8_nt_groupwise(
-            x_fp8, w_fp8, a_scale, b_scale,
-            out=out, scale_major_mode="MN",
-        )
+        wrapped_gemm(x_fp8, w_fp8, a_scale, b_scale, out)
 
         if bias is not None:
             out = out + bias
         return out.reshape(*orig_shape[:-1], out.shape[-1])
 
+    compiled_fwd = torch.compile(fp8_forward_preq, dynamic=True) if use_compile else fp8_forward_preq
+
     def cleanup():
         linear.weight = None
 
-    return fp8_forward_preq, cleanup
+    return compiled_fwd, cleanup
 
 
 # ============================================================================
