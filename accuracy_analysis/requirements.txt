@@ -13,9 +13,11 @@ huggingface-hub>=0.30.0
 # NVFP4 native compute (FlashInfer with mm_fp4)
 flashinfer-python>=0.6.5
 
+# Downstream evaluation (lm-evaluation-harness)
+lm-eval>=0.4.0
+
 # Utilities
 tqdm
 numpy
-
 
 accelerate

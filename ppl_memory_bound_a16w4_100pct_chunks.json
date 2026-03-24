@@ -1,8 +1,0 @@
-{
-  "nll_sum": 727316.0,
-  "total_tokens": 297913,
-  "completed_chunks": 583,
-  "seq_len": 298938,
-  "max_length": 512,
-  "stride": 512
-}

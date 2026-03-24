@@ -3,21 +3,21 @@
     "config": "baseline",
     "quant_mode": "bf16",
     "quantize_ratio": 0.0,
-    "perplexity": 11.30675983428955,
-    "num_tokens": 298354,
-    "mode": "memory_bound",
-    "max_length": 512,
-    "timestamp": "2026-03-21T01:19:16.422836"
+    "perplexity": 7.7543206214904785,
+    "num_tokens": 298901,
+    "mode": "compute_bound",
+    "max_length": 8192,
+    "timestamp": "2026-03-24T00:10:41.362195"
   },
   {
     "config": "fp8_100pct",
     "quant_mode": "fp8",
     "quantize_ratio": 1.0,
-    "perplexity": 11.365425109863281,
-    "num_tokens": 298354,
-    "mode": "memory_bound",
-    "max_length": 512,
-    "timestamp": "2026-03-21T04:22:10.747936"
+    "perplexity": 7.789265155792236,
+    "num_tokens": 298901,
+    "mode": "compute_bound",
+    "max_length": 8192,
+    "timestamp": "2026-03-24T00:17:50.235787"
   },
   {
     "config": "nvfp4_100pct",
