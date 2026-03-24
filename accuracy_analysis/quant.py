@@ -31,7 +31,9 @@ def compute_nvfp4_global_scale(tensor: Tensor) -> Tensor:
     range of the two-level NVFP4 scaling scheme:
         value ≈ global_scale * block_scale_fp8 * fp4_value
     """
-    absmax = tensor.float().abs().nan_to_num().max()
+    absmax = tensor.abs().max()
+    if torch.isnan(absmax):
+        absmax = tensor.float().abs().nan_to_num().max()
     return (448.0 * 6.0) / absmax.clamp(min=1e-12)
 
 
@@ -68,10 +70,7 @@ def make_nvfp4_forward(
             x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
 
-        alpha = torch.tensor(
-            1.0 / (x_global_sf.item() * w_global_sf.item()),
-            device=x.device, dtype=torch.float32,
-        )
+        alpha = (1.0 / (x_global_sf * w_global_sf)).to(dtype=torch.float32)
 
         try:
             out = mm_fp4(
@@ -119,7 +118,7 @@ def make_nvfp4_forward_prequantized(
     )
     w_fp4 = w_fp4.T.contiguous()
     w_sf = w_sf.T.contiguous()
-    w_global_sf_val = w_global_sf.item()
+    w_global_sf_inv = (1.0 / w_global_sf).to(dtype=torch.float32)
 
     def nvfp4_forward_preq(input: Tensor) -> Tensor:
         orig_shape = input.shape
@@ -130,10 +129,7 @@ def make_nvfp4_forward_prequantized(
             x, x_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
         )
 
-        alpha = torch.tensor(
-            1.0 / (x_global_sf.item() * w_global_sf_val),
-            device=x.device, dtype=torch.float32,
-        )
+        alpha = (w_global_sf_inv / x_global_sf).to(dtype=torch.float32)
 
         try:
             out = mm_fp4(
