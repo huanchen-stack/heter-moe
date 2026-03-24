@@ -144,7 +144,78 @@ if __name__ == "__main__":
         status = "FAIL (identical!)" if same else "OK (different)"
         print(f"  [{M:>3}x{K}->{N}] max_diff={diff:.6f}  {status}")
 
+    # ================================================================
+    # Test 4: Prequantized + torch.compile path
+    # ================================================================
     print()
-    print("nvfp4 = direct FP4 GEMM path")
-    print("Qwen3-30B-A3B (hidden=2048, inter=768): ALL projections fall back to FP8")
-    print("Expected: all cos > 0.90")
+    print("=" * 80)
+    print("Prequantized + torch.compile: BF16 vs NVFP4-preq vs FP8-preq")
+    print("=" * 80)
+    print(f"{'M':>6} {'K':>6} {'N':>6} | {'NV4p cos':>9} {'NV4p err':>9} | {'FP8p cos':>9} {'FP8p err':>9}")
+    print("-" * 80)
+
+    for M, K, N in shapes:
+        linear_nv = nn.Linear(K, N, bias=False, dtype=torch.bfloat16, device="cuda")
+        linear_f8 = nn.Linear(K, N, bias=False, dtype=torch.bfloat16, device="cuda")
+        linear_f8.load_state_dict(linear_nv.state_dict())
+        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+
+        with torch.no_grad():
+            ref = linear_nv(x)
+
+        nv4p_fwd, nv4p_cleanup = make_quant_forward(linear_nv, "nvfp4", backend="cutlass", prequantize=True)
+        nv4p_cleanup()
+        with torch.no_grad():
+            nv4p_out = nv4p_fwd(x)
+
+        fp8p_fwd, fp8p_cleanup = make_quant_forward(linear_f8, "fp8", prequantize=True)
+        fp8p_cleanup()
+        with torch.no_grad():
+            fp8p_out = fp8p_fwd(x)
+
+        print(f"{M:>6} {K:>6} {N:>6} | "
+              f"{cos_sim(ref, nv4p_out):>9.4f} {(ref - nv4p_out).abs().max().item():>9.4f} | "
+              f"{cos_sim(ref, fp8p_out):>9.4f} {(ref - fp8p_out).abs().max().item():>9.4f}")
+
+    # ================================================================
+    # Test 5: Prequantized ExpertMLP (full expert with compiled linears)
+    # ================================================================
+    print()
+    print("=" * 80)
+    print("Prequantized ExpertMLP: BF16 vs NVFP4-preq vs FP8-preq")
+    print("=" * 80)
+    print(f"{'M':>6} {'hidden':>8} {'inter':>8} | {'NV4p cos':>9} {'NV4p err':>9} | {'FP8p cos':>9} {'FP8p err':>9}")
+    print("-" * 80)
+
+    for M, hidden, inter in expert_shapes:
+        gate_w = torch.randn(inter, hidden, dtype=torch.bfloat16, device="cuda")
+        up_w = torch.randn(inter, hidden, dtype=torch.bfloat16, device="cuda")
+        down_w = torch.randn(hidden, inter, dtype=torch.bfloat16, device="cuda")
+
+        results = {}
+        for label, mode in [("nv4p", "nvfp4"), ("fp8p", "fp8")]:
+            expert = ExpertMLP(gate_w.clone(), up_w.clone(), down_w.clone(), nn.SiLU()).cuda()
+            x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
+
+            with torch.no_grad():
+                ref = expert(x)
+
+            for name in ["gate_proj", "up_proj", "down_proj"]:
+                proj = getattr(expert, name)
+                fwd, cleanup = make_quant_forward(proj, mode, backend="cutlass", prequantize=True)
+                proj.forward = fwd
+                if cleanup:
+                    cleanup()
+
+            with torch.no_grad():
+                out = expert(x)
+
+            results[f"{label}_cos"] = cos_sim(ref, out)
+            results[f"{label}_max_err"] = (ref - out).abs().max().item()
+
+        print(f"{M:>6} {hidden:>8} {inter:>8} | "
+              f"{results['nv4p_cos']:>9.4f} {results['nv4p_max_err']:>9.4f} | "
+              f"{results['fp8p_cos']:>9.4f} {results['fp8p_max_err']:>9.4f}")
+
+    print()
+    print("Expected: prequantized cos ≈ non-prequantized cos (same math, different execution path)")
