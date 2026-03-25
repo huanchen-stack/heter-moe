@@ -117,8 +117,8 @@ def make_nvfp4_forward_prequantized(
     w_fp4, w_sf = nvfp4_quantize(
         w, w_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False,
     )
-    w_fp4 = w_fp4.T.contiguous()
-    w_sf = w_sf.T.contiguous()
+    w_fp4 = w_fp4.T
+    w_sf = w_sf.T
     w_global_sf_val = w_global_sf.item()
 
     def nvfp4_forward_preq(input: Tensor) -> Tensor:
