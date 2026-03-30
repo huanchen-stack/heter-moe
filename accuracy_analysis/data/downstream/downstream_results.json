@@ -62,9 +62,20 @@
           "acc,none": 0.6898184688239937,
           "acc_stderr,none": 0.0130004541448598
         }
+      },
+      "gsm8k_cot": {
+        "primary_metric": 0.8771796815769523,
+        "primary_metric_name": "exact_match,strict-match",
+        "display_name": "GSM8k-CoT (8-shot)",
+        "all_metrics": {
+          "exact_match,strict-match": 0.8771796815769523,
+          "exact_match_stderr,strict-match": 0.009041108602874657,
+          "exact_match,flexible-extract": 0.9006823351023503,
+          "exact_match_stderr,flexible-extract": 0.008238371412683977
+        }
       }
     },
-    "timestamp": "2026-03-24T06:42:17.741953"
+    "timestamp": "2026-03-25T07:16:06.611491"
   },
   {
     "config": "fp8_100pct",
@@ -90,8 +101,19 @@
           "acc,none": 0.7032359905288083,
           "acc_stderr,none": 0.012839239695201914
         }
+      },
+      "gsm8k_cot": {
+        "primary_metric": 0.8733889310083397,
+        "primary_metric_name": "exact_match,strict-match",
+        "display_name": "GSM8k-CoT (8-shot)",
+        "all_metrics": {
+          "exact_match,strict-match": 0.8733889310083397,
+          "exact_match_stderr,strict-match": 0.009159715283081092,
+          "exact_match,flexible-extract": 0.8961334344200151,
+          "exact_match_stderr,flexible-extract": 0.00840362222892405
+        }
       }
     },
-    "timestamp": "2026-03-24T06:46:56.874132"
+    "timestamp": "2026-03-25T04:06:08.878720"
   }
 ]

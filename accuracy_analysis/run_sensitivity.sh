@@ -248,7 +248,7 @@ run_sensitivity() {
 # ── Qwen3-30B-A3B (30B, 48 layers, 128 experts, top-8) ──────────────────────
 echo ""
 echo "--- Qwen3-30B-A3B ---"
-run_sensitivity "${QWEN3_DIR}" "qwen3-30b-a3b" "layer_out_norm"
+run_sensitivity "${QWEN3_DIR}" "qwen3-30b-a3b" "layerwise_perplexity"
 
 # =============================================================================
 # STEP 5: Summary
