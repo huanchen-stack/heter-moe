@@ -24,17 +24,19 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 # ===================================================================
 # https://nvidia.github.io/TensorRT-LLM/installation/linux.html 
 
-conda create -n tensorrtllm python=3.10 -y
-conda activate tensorrtllm
+# conda create -n tensorrtllm python=3.10 -y
+# conda activate tensorrtllm
 
-conda install -c conda-forge mpi4py
+conda install -c conda-forge mpi4py -y
 
-pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
-
+pip install uv
+uv pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
+sudo apt-get -y install libopenmpi-dev
 CURRENT_TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
 echo "torch==$CURRENT_TORCH_VERSION" > /tmp/torch-constraint.txt
-pip install --upgrade pip setuptools && pip install tensorrt_llm -c /tmp/torch-constraint.txt
-
+# pip install --extra-index-url https://pypi.nvidia.com/ "tensorrt-llm==1.1.0" -c /tmp/torch-constraint.txt
+aria2c -x 16 -s 16 "https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.1.0-cp312-cp312-linux_x86_64.whl" -d /tmp/
+pip install /tmp/tensorrt_llm-1.1.0-cp312-cp312-linux_x86_64.whl --extra-index-url https://pypi.nvidia.com/ -c /tmp/torch-constraint.txt
 
 export PMIX_MCA_psec=native
 export PRTE_MCA_plm_ssh_agent=""
